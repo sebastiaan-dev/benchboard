@@ -421,7 +421,7 @@ export function PullRequestPage() {
       </>}
       <p className="text-muted-foreground font-mono text-[11px]">
         <ChevronUp className="inline size-3" /><ChevronDown className="inline size-3" /> navigate series · regression: CI above 1 and change beyond the threshold ·
-        improvement: CI below 1 and beyond the threshold · cross-run comparisons may include session drift · <Link className="underline" to={`/repositories/${pr.repository.id}/profiles`}>all profiles</Link>
+        improvement: CI below 1 and beyond the threshold · one Hyperfine invocation runs commands in blocks, so drift can remain; repeat in the reverse order for important results · <Link className="underline" to={`/repositories/${pr.repository.id}/profiles`}>all profiles</Link>
       </p>
     </div>
   );

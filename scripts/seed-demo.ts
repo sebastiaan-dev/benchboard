@@ -109,7 +109,7 @@ const ingest = (
 
 let recorded = Date.parse("2026-11-03T08:00:00Z");
 const tpch = ["q1", "q3", "q6", "q9", "q18"];
-// Per-commit runs as the branch evolved (cross-run comparisons, slight session drift).
+// Per-commit runs as the branch evolved (separate invocations, slight session drift).
 for (let position = 0; position < commits.length; position++) {
 	recorded += 3 * 3600_000;
 	const drift = 1 + (next() - 0.5) * 0.01;
@@ -119,7 +119,7 @@ for (let position = 0; position < commits.length; position++) {
 		ingest("micro/strings", "String predicates", [{ key: "like-prefix", position }], { recordedAt: recorded + 120_000, drift, n: 60, noise: 0.05 });
 	}
 }
-// A final interleaved base-vs-head run: the most trustworthy comparison for the PR.
+// A final base-vs-head run in one invocation (shared conditions; Hyperfine runs the commands in blocks).
 recorded += 3600_000;
 ingest("tpch/sf1", "TPC-H SF1 base vs head", tpch.flatMap((key) => [{ key, position: 0 }, { key, position: commits.length - 1 }]), { recordedAt: recorded, n: 30 });
 // Work in progress on top of head (excluded unless dirty builds are included).

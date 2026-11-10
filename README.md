@@ -48,13 +48,20 @@ To put the CLI on `PATH`: `ln -s "$PWD/packages/cli/bin/benchboard.ts" ~/.local/
 
    The base is the parent of the PR's first commit (GitHub) or the closest merge base (local).
 
-2. Measure the base and PR commits, ideally interleaved in one Hyperfine invocation so session
-   drift cancels out, and attribute each case to a commit:
+2. Measure the base and PR commits and attribute each case to a commit:
 
    ```sh
    hyperfine --export-json q1.json './base/duckdb -c "..."' './head/duckdb -c "..."'
    benchboard ingest q1.json --meta meta.json
    ```
+
+   Measuring both commits in one Hyperfine invocation keeps machine conditions as similar as possible,
+   but it does **not** interleave them: Hyperfine runs all iterations of one command, then the next
+   (`A A A B B B`), so thermal, cache or background-load drift between the two blocks can still bias the
+   ratio, and the bootstrap interval only reflects within-block noise. For important comparisons, repeat
+   the invocation with the commands in the opposite order (`hyperfine … head base`) and ingest both
+   runs; a change that is real survives both orders. The report shows which invocation each side came
+   from and how many other measurements of the same commits it did not use.
 
    ```json
    {
@@ -143,9 +150,16 @@ Stored call trees are re-aggregated from the retained raw profiles when the aggr
   * **regression** — CI entirely above 1 and the change exceeds the threshold;
   * **improvement** — CI entirely below 1 and the change exceeds the threshold;
   * **unchanged** — change within the threshold and CI within twice the threshold;
-  * **inconclusive** — anything else (collect more samples or measure in one run).
-* Each series is compared with its measurement at the PR base, or its first measured commit.
-  Pairs from the same Hyperfine run are preferred; cross-run comparisons are flagged.
+  * **inconclusive** — anything else (collect more samples, or reduce noise);
+  * **insufficient** — fewer than 3 samples on a side: the ratio is shown, but no interval or verdict.
+* Each series is compared with its measurement at the PR base, or its first measured commit. The
+  *head* verdict needs a measurement at the PR head; otherwise the last measured commit is shown
+  separately and not counted. Steps across unmeasured commits are marked and not attributed to one
+  commit.
+* Each commit's representative measurement (passing, clean, most recent) is the candidate of its
+  comparisons; the baseline comes from the same Hyperfine invocation when the reference commit has an
+  equally eligible measurement there. Every figure shown for a comparison comes from those two
+  measurements. Comparisons between separate invocations are flagged.
 * Comparisons never mix machines (default: the machine with the most measurements). Dirty builds are
   excluded unless requested, and clean measurements stay representative when both exist.
 
