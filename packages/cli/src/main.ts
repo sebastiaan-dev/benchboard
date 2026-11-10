@@ -35,9 +35,10 @@ Usage:
                                               Attach a samply profile to a measured case
   benchboard profile record <run>[:<case>] [--iterations n] [--rate hz] [-- command...]
                                               Profile the case's command with samply and attach it
-  benchboard profile show <id> [--limit n]    Hottest functions (self and total CPU time)
-  benchboard profile diff <base-id> <head-id> [--limit n]
-                                              Per-function CPU-time change between two profiles
+  benchboard profile show <id> [--limit n] [--metric cpu|sampled]
+                                              Hottest functions by on-CPU (default) or sampled time
+  benchboard profile diff <base-id> <head-id> [--limit n] [--metric cpu|sampled]
+                                              Per-function time change between two profiles
   benchboard runs [--limit n] [--all]         Recent runs
   benchboard query <graphql|@file> [--variables <json>]
                                               Execute a GraphQL document locally; prints JSON
@@ -194,6 +195,7 @@ export async function main(argv: string[]): Promise<number> {
 			"include-dirty": { type: "boolean" }, limit: { type: "string" }, variables: { type: "string" },
 			port: { type: "string" }, host: { type: "string" }, open: { type: "boolean" },
 			syms: { type: "string" }, iterations: { type: "string" }, label: { type: "string" }, rate: { type: "string" },
+			metric: { type: "string" },
 		},
 	});
 	const [command, ...rest] = positionals;
@@ -277,7 +279,8 @@ export async function main(argv: string[]): Promise<number> {
 				const printProfile = (profile: Profile) => {
 					const m = store.measurement(profile.measurementId)!;
 					console.log(`Profile ${profile.id} → run ${m.runId} case ${m.position} [${m.caseKey}] @ ${m.commitSha?.slice(0, 10) ?? "?"}: ` +
-						`${profile.samples} samples, ${(profile.samples * profile.intervalMs / profile.iterations).toFixed(1)} ms CPU/iteration, ` +
+						`${profile.samples} samples, ${(profile.cpuMs / profile.iterations).toFixed(1)} ms on CPU and ${(profile.sampledMs / profile.iterations).toFixed(1)} ms sampled per iteration` +
+						`${profile.cpuSource === "sample-count" ? " (no CPU deltas: CPU estimated from samples)" : ""}, ` +
 						`${(profile.symbolicatedShare * 100).toFixed(1)}% symbolicated${profile.symsSha256 ? "" : " (no .syms.json sidecar)"}`);
 				};
 				if (action === "attach") {
@@ -316,23 +319,29 @@ export async function main(argv: string[]): Promise<number> {
 					return profile;
 				};
 				const ms = (value: number) => `${value.toFixed(1)} ms`.padStart(11);
+				const metric = options.metric === "sampled" ? "sampled" : "cpu";
+				if (options.metric !== undefined && options.metric !== "cpu" && options.metric !== "sampled") throw new Error("--metric must be cpu or sampled.");
+				const metricLabel = metric === "cpu" ? "on-CPU" : "sampled (incl. off-CPU)";
 				if (action === "show") {
 					const profile = load(args[0]);
 					const tree = store.profileTree(profile.id);
-					const scale = tree.intervalMs / profile.iterations;
-					const stats = functionStats(tree).sort((a, b) => b.self - a.self).slice(0, limit);
+					const scale = 1 / profile.iterations;
+					const stats = functionStats(tree, metric).sort((a, b) => b.self - a.self).slice(0, limit)
+						.map((stat) => ({ ...stat, self: stat.self * scale, total: stat.total * scale }));
 					if (options.json) { json(stats); return 0; }
 					printProfile(profile);
-					console.log(`${"self".padStart(11)} ${"total".padStart(11)}  function`);
-					for (const stat of stats) console.log(`${ms(stat.self * scale)} ${ms(stat.total * scale)}  ${clean(stat.name).slice(0, 120)}${stat.library ? color("dim", `  ${stat.library}`) : ""}`);
+					console.log(`${"self".padStart(11)} ${"total".padStart(11)}  function · ${metricLabel} ms per iteration`);
+					for (const stat of stats) console.log(`${ms(stat.self)} ${ms(stat.total)}  ${clean(stat.name).slice(0, 120)}${stat.library ? color("dim", `  ${stat.library}`) : ""}`);
 					return 0;
 				}
 				if (action === "diff") {
 					const [base, head] = [load(args[0]), load(args[1])];
-					const deltas = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), { base: base.iterations, head: head.iterations }).slice(0, limit);
+					const deltas = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), {
+						metric, iterations: { base: base.iterations, head: head.iterations },
+					}).slice(0, limit);
 					if (options.json) { json(deltas); return 0; }
-					const cpu = (p: Profile) => p.samples * p.intervalMs / p.iterations;
-					console.log(`CPU per iteration: ${cpu(base).toFixed(1)} ms → ${cpu(head).toFixed(1)} ms (${percent(cpu(head) / cpu(base))})`);
+					const total = (p: Profile) => (metric === "cpu" ? p.cpuMs : p.sampledMs) / p.iterations;
+					console.log(`${metric === "cpu" ? "On-CPU" : "Sampled"} time per iteration: ${total(base).toFixed(1)} ms → ${total(head).toFixed(1)} ms (${percent(total(head) / total(base))})`);
 					console.log(`${"Δ self".padStart(11)} ${"base".padStart(11)} ${"head".padStart(11)}  function`);
 					for (const d of deltas) {
 						const delta = d.headSelfMs - d.baseSelfMs;

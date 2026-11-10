@@ -12,7 +12,7 @@ import {
 } from "./git.ts";
 import { fetchCommit, fetchPullRequest, parsePullRequestReference } from "./github.ts";
 import { MAX_PROFILE_BYTES, decodeProfileBytes, parseProfile, type SymsSidecar } from "./profile.ts";
-import type { CallTree } from "./profile-tree.ts";
+import { TREE_VERSION, type CallTree, type CpuSource } from "./profile-tree.ts";
 
 export interface Repository {
 	id: number;
@@ -123,7 +123,12 @@ export interface Profile {
 	samples: number;
 	intervalMs: number;
 	durationMs: number | null;
-	threads: { name: string; samples: number }[];
+	/** Measured on-CPU time, summed over threads (or estimated from samples, see cpuSource). */
+	cpuMs: number;
+	/** Sampled time (samples × interval) summed over threads, including waiting and sleeping. */
+	sampledMs: number;
+	cpuSource: CpuSource;
+	threads: { name: string; samples: number; cpuMs: number; sampledMs: number }[];
 	symbolicatedShare: number;
 	nodeCount: number;
 	command: string | null;
@@ -196,8 +201,11 @@ const toMeasurement = (row: unknown) => mapRow<Measurement>(row, {
 const toRun = (row: unknown) => mapRow<Run>(row, { checkoutDirty: bool });
 const toCommit = (row: unknown) => mapRow<Commit>(row, { parents: (value: string) => JSON.parse(value) });
 const PROFILE_COLUMNS = `id, measurement_id, label, tool, sha256, syms_sha256, product, iterations, samples, interval_ms, duration_ms,
+	cpu_ms, sampled_ms, cpu_source,
 	threads, symbolicated_share, node_count, command, recorded_at`;
-const toProfile = (row: unknown) => mapRow<Profile>(row, { threads: (value: string) => JSON.parse(value) });
+const toProfile = (row: unknown) => mapRow<Profile>(row, {
+	threads: (value: string) => JSON.parse(value) as Profile["threads"],
+});
 
 export function defaultHome(): string {
 	if (process.env.BENCHBOARD_HOME) return path.resolve(process.env.BENCHBOARD_HOME);
@@ -256,6 +264,14 @@ export class Store {
 	constructor(home = defaultHome()) {
 		this.home = home;
 		this.db = openDatabase(home === ":memory:" ? ":memory:" : path.join(home, "benchboard.db"));
+		const { failed } = this.reaggregateProfiles();
+		for (const failure of failed) console.error(`benchboard: could not re-aggregate profile ${failure.id}: ${failure.error}`);
+	}
+
+	/** Incremented on every write; caches derived from stored data key on it. */
+	version = 0;
+	private changed() {
+		this.version++;
 	}
 
 	close() {
@@ -447,6 +463,7 @@ export class Store {
 					this.attachProfile({ ...spec, measurementId: measurements[index].id, cwd: input.cwd });
 				}
 			});
+			this.changed();
 			return { run: this.run(id)!, measurements, benchmark, repository, warnings };
 		});
 	}
@@ -460,11 +477,7 @@ export class Store {
 		const bytes = readBounded(file, MAX_PROFILE_BYTES);
 		const symsFile = input.syms === null ? null : input.syms ? resolve(input.syms) : fs.existsSync(sidecarPath(file)) ? sidecarPath(file) : null;
 		const symsBytes = symsFile ? readBounded(symsFile, MAX_PROFILE_BYTES) : null;
-		let syms: SymsSidecar | null = null;
-		if (symsBytes) {
-			try { syms = JSON.parse(symsBytes.toString("utf8")); } catch (error) { throw new Error(`Invalid symbol sidecar ${symsFile}: ${(error as Error).message}`); }
-		}
-		const parsed = parseProfile(decodeProfileBytes(bytes), syms);
+		const parsed = this.parseProfileFiles(bytes, symsBytes, symsFile);
 		const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 		const sha256 = digest(bytes);
 		const symsSha256 = symsBytes ? digest(symsBytes) : null;
@@ -479,16 +492,57 @@ export class Store {
 		store(`${sha256}.json.gz`, bytes[0] === 0x1f && bytes[1] === 0x8b ? bytes : Bun.gzipSync(new Uint8Array(bytes)));
 		if (symsBytes && symsSha256) store(`${symsSha256}.syms.json`, symsBytes);
 		const id = Number(this.db.query(`INSERT INTO profile (measurement_id, label, tool, sha256, syms_sha256, product, iterations,
-			samples, interval_ms, duration_ms, threads, symbolicated_share, node_count, command, recorded_at, tree)
+			samples, interval_ms, duration_ms, threads, symbolicated_share, node_count, command, recorded_at, tree, cpu_ms, sampled_ms,
+			cpu_source, tree_version)
 			VALUES (:measurement_id, :label, 'samply', :sha256, :syms_sha256, :product, :iterations, :samples, :interval_ms,
-			:duration_ms, :threads, :symbolicated_share, :node_count, :command, :recorded_at, :tree)`).run({
+			:duration_ms, :threads, :symbolicated_share, :node_count, :command, :recorded_at, :tree, :cpu_ms, :sampled_ms,
+			:cpu_source, :tree_version)`).run({
 			measurement_id: measurement.id, label: input.label ?? null, sha256, syms_sha256: symsSha256, product: parsed.product,
-			iterations: input.iterations ?? 1, samples: parsed.tree.samples, interval_ms: parsed.tree.intervalMs,
-			duration_ms: parsed.durationMs, threads: JSON.stringify(parsed.tree.threads), symbolicated_share: parsed.symbolicatedShare,
-			node_count: parsed.tree.nodes.func.length, command: input.command ?? null, recorded_at: new Date().toISOString(),
-			tree: Bun.gzipSync(new TextEncoder().encode(JSON.stringify(parsed.tree))),
+			iterations: input.iterations ?? 1, command: input.command ?? null, recorded_at: new Date().toISOString(),
+			...this.profileColumns(parsed),
 		}).lastInsertRowid);
+		this.changed();
 		return this.profile(id)!;
+	}
+
+	private parseProfileFiles(bytes: Uint8Array, symsBytes: Uint8Array | null, symsName: string | null) {
+		let syms: SymsSidecar | null = null;
+		if (symsBytes) {
+			try { syms = JSON.parse(new TextDecoder().decode(symsBytes)); } catch (error) { throw new Error(`Invalid symbol sidecar ${symsName}: ${(error as Error).message}`); }
+		}
+		return parseProfile(decodeProfileBytes(bytes), syms);
+	}
+
+	private profileColumns(parsed: ReturnType<typeof parseProfile>) {
+		return {
+			samples: parsed.tree.samples, interval_ms: parsed.tree.intervalMs, duration_ms: parsed.durationMs,
+			threads: JSON.stringify(parsed.tree.threads), symbolicated_share: parsed.symbolicatedShare,
+			node_count: parsed.tree.nodes.func.length, cpu_ms: parsed.tree.cpuMs, sampled_ms: parsed.tree.sampledMs,
+			cpu_source: parsed.tree.cpuSource, tree_version: TREE_VERSION,
+			tree: Bun.gzipSync(new TextEncoder().encode(JSON.stringify(parsed.tree))),
+		};
+	}
+
+	/** Rebuilds call trees aggregated by an older parser from the retained raw profiles. */
+	reaggregateProfiles(): { updated: number; failed: { id: number; error: string }[] } {
+		const outdated = this.db.query("SELECT id, sha256, syms_sha256 FROM profile WHERE tree_version < ?").all(TREE_VERSION) as
+			{ id: number; sha256: string; syms_sha256: string | null }[];
+		const failed: { id: number; error: string }[] = [];
+		const update = this.db.query(`UPDATE profile SET samples = :samples, interval_ms = :interval_ms, duration_ms = :duration_ms,
+			threads = :threads, symbolicated_share = :symbolicated_share, node_count = :node_count, cpu_ms = :cpu_ms,
+			sampled_ms = :sampled_ms, cpu_source = :cpu_source, tree_version = :tree_version, tree = :tree WHERE id = :id`);
+		for (const row of outdated) {
+			try {
+				const raw = fs.readFileSync(path.join(this.home, "profiles", `${row.sha256}.json.gz`));
+				const symsName = row.syms_sha256 ? path.join(this.home, "profiles", `${row.syms_sha256}.syms.json`) : null;
+				const syms = symsName && fs.existsSync(symsName) ? fs.readFileSync(symsName) : null;
+				update.run({ id: row.id, ...this.profileColumns(this.parseProfileFiles(raw, syms, symsName)) });
+			} catch (error) {
+				failed.push({ id: row.id, error: (error as Error).message });
+			}
+		}
+		if (outdated.length) this.changed();
+		return { updated: outdated.length - failed.length, failed };
 	}
 
 	profile(id: number): Profile | undefined {
@@ -522,6 +576,7 @@ export class Store {
 		return profile.symsSha256 ? path.join(this.home, "profiles", `${profile.symsSha256}.syms.json`) : null;
 	}
 	deleteProfile(id: number): boolean {
+		this.changed();
 		return this.db.query("DELETE FROM profile WHERE id = ?").run(id).changes > 0;
 	}
 	/** Resolves `run-id[:position]` (position defaults to the only case). */
@@ -643,10 +698,12 @@ export class Store {
 			this.upsertCommit(repositoryId, commit);
 			insert.run(id, index + 1, commit.sha);
 		});
+		this.changed();
 		return this.pullRequest(id)!;
 	}
 
 	deleteRun(id: string): boolean {
+		this.changed();
 		return this.db.query("DELETE FROM run WHERE id = ?").run(id).changes > 0;
 	}
 

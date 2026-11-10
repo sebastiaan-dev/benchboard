@@ -161,8 +161,8 @@ test("CLI: attach samply profiles and compare them", () => {
 	const show = JSON.parse(cli("profile", "show", "1", "--json").stdout);
 	assert.deepEqual(show[0], { name: "CompareKeys", library: "engine", self: 50, total: 50 });
 	const diff = cli("profile", "diff", "1", "2");
-	assert.match(diff.stdout, /CPU per iteration: 60\.0 ms → 10\.0 ms/);
+	assert.match(diff.stdout, /On-CPU time per iteration: 60\.0 ms → 10\.0 ms/);
 	assert.match(diff.stdout, /-45\.0 ms .*CompareKeys/);
-	const query = JSON.parse(cli("query", "{ profileDiff(base: 1, head: 2, limit: 1) { headCpuMs functions { name deltaSelfMs } } }").stdout);
-	assert.deepEqual(query.data.profileDiff, { headCpuMs: 10, functions: [{ name: "CompareKeys", deltaSelfMs: -45 }] });
+	const query = JSON.parse(cli("query", "{ profileDiff(base: 1, head: 2, limit: 1) { headMs functions { name deltaSelfMs } } }").stdout);
+	assert.deepEqual(query.data.profileDiff, { headMs: 10, functions: [{ name: "CompareKeys", deltaSelfMs: -45 }] });
 });

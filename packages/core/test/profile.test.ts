@@ -4,7 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import {
-	Store, diffFunctions, diffTrees, functionStats, mergeThreads, parseProfile, prune, sidecarPath, symbolicateRequest,
+	Store, decodeProfileBytes, diffFunctions, diffTrees, functionStats, mergeThreads, parseProfile, prune, sidecarPath,
+	symbolicateRequest, totals,
 	type SymsSidecar,
 } from "../src/index.ts";
 import { syntheticProfile } from "./synthetic-profile.ts";
@@ -29,7 +30,9 @@ test("samply profiles are symbolicated with inlined frames and aggregated per th
 	const parsed = parseProfile(profile, syms as SymsSidecar);
 	assert.equal(parsed.symbolicatedShare, 1);
 	assert.equal(parsed.tree.samples, 5 + 2 * 80);
-	assert.deepEqual(parsed.tree.threads, [{ name: "worker", samples: 160 }, { name: "main", samples: 5 }]);
+	assert.deepEqual(parsed.tree.threads, [
+		{ name: "worker", samples: 160, cpuMs: 160, sampledMs: 160 }, { name: "main", samples: 5, cpuMs: 5, sampledMs: 5 },
+	]);
 	const stats = new Map(functionStats(parsed.tree).map((stat) => [stat.name, stat]));
 	// The inlined ProbeChunk frame expands below its containing HashJoin::Probe symbol.
 	assert.equal(stats.get("HashJoin::Probe")!.total, 120);
@@ -43,7 +46,40 @@ test("samply profiles are symbolicated with inlined frames and aggregated per th
 	assert.equal(mergeThreads(parsed.tree, new Set(["main"])).samples, 5);
 	const pruned = prune(parsed.tree, 4);
 	assert.equal(pruned.nodes.func.length, 4);
-	assert.equal(pruned.nodes.total[0], parsed.tree.samples, "Pruning folds samples into parents.");
+	assert.equal(totals(pruned, "sampled")[0], parsed.tree.sampledMs, "Pruning folds samples into parents.");
+	assert.equal(totals(pruned, "cpu")[0], parsed.tree.cpuMs);
+	assert.equal(parsed.tree.cpuSource, "sample-count", "Synthetic profiles have no CPU deltas, so CPU is an estimate.");
+});
+
+const fixture = (name: string) => {
+	const file = path.join(import.meta.dir, "fixtures", `${name}.json.gz`);
+	return parseProfile(decodeProfileBytes(fs.readFileSync(file)), JSON.parse(fs.readFileSync(sidecarPath(file), "utf8")));
+};
+
+test("real samply profiles separate on-CPU time from sleeping and blocking", () => {
+	// Python sleeping for 2 s: ~2 s sampled, ~25 ms on CPU, the sleep itself almost free.
+	const sleep = fixture("samply-python-sleep").tree;
+	assert.equal(sleep.cpuSource, "thread-cpu-delta");
+	assert.ok(sleep.sampledMs > 1900 && sleep.sampledMs < 2200, String(sleep.sampledMs));
+	assert.ok(sleep.cpuMs > 15 && sleep.cpuMs < 60, String(sleep.cpuMs));
+	const wait = functionStats(sleep, "cpu").find((stat) => stat.name === "__semwait_signal")!;
+	assert.ok(wait.self < 1, `sleeping is not CPU time (${wait.self} ms)`);
+	assert.ok(functionStats(sleep, "sampled").find((stat) => stat.name === "__semwait_signal")!.self > 1900);
+
+	// Two threads contend on a mutex while main joins: blocked time is sampled but not CPU.
+	const locks = fixture("samply-locks").tree;
+	const byThread = new Map(locks.threads.map((thread) => [thread.name, thread]));
+	assert.equal(locks.threads.length, 3);
+	const main = byThread.get("locks")!;
+	assert.ok(main.cpuMs < 20 && main.sampledMs > 500, JSON.stringify(main));
+	const cpu = new Map(functionStats(locks, "cpu").map((stat) => [stat.name, stat]));
+	const sampled = new Map(functionStats(locks, "sampled").map((stat) => [stat.name, stat]));
+	assert.ok(cpu.get("spin")!.self > 800, "computation is CPU time");
+	const blocked = ["__psynch_mutexwait", "__ulock_wait", "__ulock_wait2", "__psynch_cvwait"].map((name) => sampled.get(name)?.self ?? 0).reduce((a, b) => a + b, 0);
+	assert.ok(blocked > 500, `waiting shows up in sampled time (${blocked} ms)`);
+	const blockedCpu = ["__psynch_mutexwait", "__ulock_wait", "__ulock_wait2", "__psynch_cvwait"].map((name) => cpu.get(name)?.self ?? 0).reduce((a, b) => a + b, 0);
+	assert.ok(blockedCpu < 20, `but barely any CPU (${blockedCpu} ms)`);
+	assert.ok(Math.abs(totals(locks, "cpu")[0] - locks.cpuMs) < 1e-6);
 });
 
 test("profile diffs attribute CPU-time changes to functions and call paths", () => {
@@ -53,7 +89,7 @@ test("profile diffs attribute CPU-time changes to functions and call paths", () 
 	assert.equal(top.name, "CompareKeys");
 	assert.equal(top.baseSelfMs, 120);
 	assert.equal(top.headSelfMs, 30);
-	const tree = diffTrees(base, head, { base: 2, head: 1 });
+	const tree = diffTrees(base, head, { iterations: { base: 2, head: 1 } });
 	assert.equal(tree.nodes.base[0], 165 / 2);
 	assert.equal(tree.nodes.head[0], 75);
 });

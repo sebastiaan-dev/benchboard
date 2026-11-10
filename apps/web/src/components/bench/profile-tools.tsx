@@ -1,5 +1,7 @@
 import { useMemo, useState } from "react";
-import { mergeThreads, type CallTree } from "@benchboard/core/profile-tree";
+import { mergeThreads, type CallTree, type Metric } from "@benchboard/core/profile-tree";
+import { Segmented } from "@/components/kit/encodings";
+import { Hint } from "@/components/bench/states";
 import { graphql } from "@/gql";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -14,6 +16,8 @@ export const ProfileHeaderFields = graphql(`
     intervalMs
     iterations
     cpuMs
+    sampledMs
+    cpuSource
     durationMs
     symbolicatedShare
     hasSymbols
@@ -21,7 +25,7 @@ export const ProfileHeaderFields = graphql(`
     command
     recordedAt
     rawPath
-    threads { name samples }
+    threads { name samples cpuMs sampledMs }
     measurement {
       id
       position
@@ -71,7 +75,9 @@ export function ThreadControls({ tree, state }: { tree: CallTree; state: ThreadS
         <SelectContent>
           <SelectItem value="all">All threads ({tree.threads.length})</SelectItem>
           {tree.threads.map((thread) => (
-            <SelectItem key={thread.name} value={thread.name}>{thread.name} · {((thread.samples / tree.samples) * 100).toFixed(1)}%</SelectItem>
+            <SelectItem key={thread.name} value={thread.name}>
+              {thread.name} · {tree.cpuMs ? ((thread.cpuMs / tree.cpuMs) * 100).toFixed(1) : "0.0"}% CPU · {tree.sampledMs ? ((thread.sampledMs / tree.sampledMs) * 100).toFixed(1) : "0.0"}% sampled
+            </SelectItem>
           ))}
         </SelectContent>
       </Select>
@@ -84,3 +90,21 @@ export function ThreadControls({ tree, state }: { tree: CallTree; state: ThreadS
     </div>
   );
 }
+
+/** On-CPU vs sampled time. Sampled time includes waiting, sleeping and blocking (where wall time goes). */
+export function MetricToggle({ value, onChange, cpuSource }: { value: Metric; onChange: (metric: Metric) => void; cpuSource: string }) {
+  return (
+    <Hint content={cpuSource === "SAMPLE_COUNT"
+      ? "This profile has no per-sample CPU deltas, so CPU time is estimated from samples and includes off-CPU time."
+      : "On-CPU: measured from samply's per-thread CPU deltas. Sampled: samples × interval, which also counts time spent waiting, sleeping or blocked."}>
+      <span>
+        <Segmented value={value} onChange={onChange} options={[
+          { value: "cpu", label: cpuSource === "SAMPLE_COUNT" ? "CPU (estimated)" : "On-CPU" },
+          { value: "sampled", label: "Sampled (incl. waiting)" },
+        ]} />
+      </span>
+    </Hint>
+  );
+}
+
+export const metricLabel = (metric: Metric) => metric === "cpu" ? "on-CPU" : "sampled";

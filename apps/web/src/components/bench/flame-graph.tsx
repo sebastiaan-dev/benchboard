@@ -1,5 +1,5 @@
 import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
-import { childrenOf, functionLibrary, functionName, isThread, type CallTree, type DiffTree } from "@benchboard/core/profile-tree";
+import { childrenOf, functionLibrary, functionName, isThread, totals, type CallTree, type DiffTree, type Metric } from "@benchboard/core/profile-tree";
 import { cn } from "@/lib/utils";
 
 export interface FlameNode {
@@ -18,17 +18,21 @@ export interface FlameNode {
   children: FlameNode[];
 }
 
-/** Hierarchy from a call tree; widths in CPU ms per iteration. Children are sorted heaviest first. */
-export function fromCallTree(tree: CallTree, msPerSample: number): FlameNode {
+/** Hierarchy from a call tree; widths in milliseconds per iteration of the chosen metric, heaviest children first. */
+export function fromCallTree(tree: CallTree, metric: Metric, iterations = 1): FlameNode {
   const children = childrenOf(tree);
+  const inclusive = totals(tree, metric);
+  const self = tree.nodes[metric];
+  const scale = 1 / Math.max(1, iterations);
   const build = (node: number, parent: FlameNode | null, depth: number): FlameNode => {
     const func = tree.nodes.func[node];
     const result: FlameNode = {
       id: node, name: node === 0 ? "all" : functionName(tree, func), library: node === 0 ? null : functionLibrary(tree, func),
-      value: tree.nodes.total[node] * msPerSample, self: tree.nodes.self[node] * msPerSample,
+      value: inclusive[node] * scale, self: self[node] * scale,
       thread: node !== 0 && isThread(tree, func), depth, parent, children: [],
     };
-    result.children = children[node].map((child) => build(child, result, depth + 1)).sort((a, b) => b.value - a.value);
+    result.children = children[node].map((child) => build(child, result, depth + 1)).filter((child) => child.value > 0)
+      .sort((a, b) => b.value - a.value);
     return result;
   };
   return build(0, null, 0);

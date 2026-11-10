@@ -1,4 +1,4 @@
-import { CallTreeBuilder, THREAD_LIBRARY, type CallTree } from "./profile-tree.ts";
+import { CallTreeBuilder, THREAD_LIBRARY, type CallTree, type CpuSource } from "./profile-tree.ts";
 
 export const MAX_PROFILE_BYTES = 512 * 1024 * 1024;
 
@@ -114,7 +114,12 @@ export function parseProfile(data: unknown, syms?: SymsSidecar | null, maxNodes?
 	const libSyms = libs.map((lib) => symbolicator?.library(lib.debugName ?? lib.name, lib.breakpadId));
 	const shared = isObject(data.shared) ? data.shared : {};
 	const builder = new CallTreeBuilder();
-	const threadSamples = new Map<string, number>();
+	const threadStats = new Map<string, { samples: number; cpuMs: number; sampledMs: number }>();
+	const intervalMs = Number(data.meta.interval) || 1;
+	// samply records per-sample CPU deltas in µs (or ns); cycle counts cannot be converted to time.
+	const cpuUnit = data.meta.sampleUnits?.threadCPUDelta;
+	const cpuScale = cpuUnit === "µs" || cpuUnit === "us" ? 1e-3 : cpuUnit === "ns" ? 1e-6 : null;
+	let cpuSource: CpuSource = cpuScale === null ? "sample-count" : "thread-cpu-delta";
 	let resolved = 0, unresolved = 0;
 	let start = Infinity, end = -Infinity;
 
@@ -167,25 +172,41 @@ export function parseProfile(data: unknown, syms?: SymsSidecar | null, maxNodes?
 			}
 			return stackNodes[stack];
 		};
-		let total = 0;
+		const deltas: (number | null)[] | undefined = Array.isArray(samples.threadCPUDelta) ? samples.threadCPUDelta : undefined;
+		if (!deltas && (samples.length ?? samples.stack.length) > 0) cpuSource = "sample-count";
+		// Weights are sample counts, except for traced profiles whose weights are already milliseconds.
+		const sampleMs = samples.weightType === "tracing-ms" ? 1 : intervalMs;
+		const stats = threadStats.get(threadName) ?? { samples: 0, cpuMs: 0, sampledMs: 0 };
 		const count = samples.length ?? samples.stack.length;
 		for (let i = 0; i < count; i++) {
 			const stack = samples.stack[i];
 			const weight = samples.weight?.[i] ?? 1;
-			if (stack === null || stack === undefined || !weight) continue;
-			builder.addSelf(nodeOf(stack), weight);
-			total += weight;
-			resolved += weight * stackResolved[stack];
-			unresolved += weight * (stackDepth[stack] - stackResolved[stack]);
+			const sampled = weight * sampleMs;
+			const delta = deltas?.[i];
+			// CPU deltas cover the time since the thread's previous sample, so idle samples weigh ~0.
+			const cpu = cpuScale !== null && deltas ? (typeof delta === "number" && delta > 0 ? delta * cpuScale : 0) : sampled;
+			if (!sampled && !cpu) continue;
+			const node = stack === null || stack === undefined ? root : nodeOf(stack);
+			builder.add(node, cpu, sampled);
+			stats.samples += weight;
+			stats.cpuMs += cpu;
+			stats.sampledMs += sampled;
+			if (stack !== null && stack !== undefined) {
+				resolved += sampled * stackResolved[stack];
+				unresolved += sampled * (stackDepth[stack] - stackResolved[stack]);
+			}
 			const time = samples.time?.[i];
 			if (typeof time === "number") { start = Math.min(start, time); end = Math.max(end, time); }
 		}
-		threadSamples.set(threadName, (threadSamples.get(threadName) ?? 0) + total);
+		threadStats.set(threadName, stats);
 	}
-	const tree = builder.build({
-		intervalMs: Number(data.meta.interval) || 1,
-		threads: [...threadSamples].map(([name, samples]) => ({ name, samples })).sort((a, b) => b.samples - a.samples),
-	}, maxNodes);
+	if (cpuSource === "sample-count") {
+		// Without CPU deltas, CPU time can only be estimated from samples; say so rather than pretend.
+		for (let node = 0; node < builder.nodes.cpu.length; node++) builder.nodes.cpu[node] = builder.nodes.sampled[node];
+		for (const stats of threadStats.values()) stats.cpuMs = stats.sampledMs;
+	}
+	const threads = [...threadStats].map(([name, stats]) => ({ name, ...stats })).sort((a, b) => b.cpuMs - a.cpuMs || b.sampledMs - a.sampledMs);
+	const tree = builder.build({ intervalMs, cpuSource, threads, samples: threads.reduce((sum, thread) => sum + thread.samples, 0) }, maxNodes);
 	if (!tree.samples) throw new Error("The profile contains no samples; was the workload too short or did samply lack permission (`samply setup`)?");
 	return {
 		tree,

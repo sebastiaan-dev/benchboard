@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { makeExecutableSchema } from "@graphql-tools/schema";
 import { GraphQLScalarType, Kind, type GraphQLSchema, type ValueNode } from "graphql";
 import {
-	compare, diffFunctions, functionStats, pullRequestReport, type Profile, type Commit, type Comparison, type Measurement, type PullRequest, type PullRequestReport,
+	compare, diffFunctions, functionStats, metricTotal, pullRequestReport, type Metric, type Profile, type Commit, type Comparison, type Measurement, type PullRequest, type PullRequestReport,
 	type ReportPoint, type Repository, type Run, type SeriesReport, type Store,
 } from "@benchboard/core";
 
@@ -59,7 +59,8 @@ const JSONScalar = new GraphQLScalarType({
 	name: "JSON", serialize: (value) => value, parseValue: (value) => value, parseLiteral: literal,
 });
 
-const cpuMs = (profile: Profile) => profile.samples * profile.intervalMs / profile.iterations;
+const metricOf = (value: unknown): Metric => value === "sampled" ? "sampled" : "cpu";
+const perIteration = (profile: Profile, metric: Metric) => (metric === "cpu" ? profile.cpuMs : profile.sampledMs) / profile.iterations;
 
 export const resolvers = {
 	JSON: JSONScalar,
@@ -82,10 +83,11 @@ export const resolvers = {
 			const base = store.profile(id(args.base));
 			const head = store.profile(id(args.head));
 			if (!base || !head) throw new Error("Unknown profile.");
-			const functions = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), { base: base.iterations, head: head.iterations })
+			const metric = metricOf(args.metric);
+			const functions = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), { metric, iterations: { base: base.iterations, head: head.iterations } })
 				.slice(0, Math.min(args.limit ?? 200, 5000))
 				.map((entry) => ({ ...entry, deltaSelfMs: entry.headSelfMs - entry.baseSelfMs, deltaTotalMs: entry.headTotalMs - entry.baseTotalMs }));
-			return { base, head, baseCpuMs: cpuMs(base), headCpuMs: cpuMs(head), functions };
+			return { base, head, metric, baseMs: perIteration(base, metric), headMs: perIteration(head, metric), functions };
 		},
 	},
 	Mutation: {
@@ -107,9 +109,15 @@ export const resolvers = {
 		},
 	},
 	ProfileSort: { SELF: "self", TOTAL: "total" },
+	ProfileMetric: { CPU: "cpu", SAMPLED: "sampled" },
+	CpuSource: { THREAD_CPU_DELTA: "thread-cpu-delta", SAMPLE_COUNT: "sample-count" },
 	Profile: {
 		measurement: (profile: Profile, _: Args, { store }: Context) => store.measurement(profile.measurementId),
-		cpuMs,
+		cpuMs: (profile: Profile) => perIteration(profile, "cpu"),
+		sampledMs: (profile: Profile) => perIteration(profile, "sampled"),
+		threads: (profile: Profile) => profile.threads.map((thread) => ({
+			...thread, cpuMs: (thread.cpuMs ?? 0) / profile.iterations, sampledMs: (thread.sampledMs ?? 0) / profile.iterations,
+		})),
 		hasSymbols: (profile: Profile) => profile.symsSha256 !== null,
 		rawPath: (profile: Profile) => `/profiles/${profile.id}/profile.json.gz`,
 		firefoxProfilerUrl: (profile: Profile, args: Args) => {
@@ -126,11 +134,13 @@ export const resolvers = {
 		},
 		topFunctions: (profile: Profile, args: Args, { store }: Context) => {
 			const tree = store.profileTree(profile.id);
-			const scale = tree.intervalMs / profile.iterations;
+			const metric = metricOf(args.metric);
+			const scale = 1 / profile.iterations;
+			const total = metricTotal(tree, metric) || 1;
 			const key = args.by === "total" ? "total" : "self";
-			return functionStats(tree).sort((a, b) => b[key] - a[key]).slice(0, Math.min(args.limit ?? 50, 1000)).map((stat) => ({
+			return functionStats(tree, metric).sort((a, b) => b[key] - a[key]).slice(0, Math.min(args.limit ?? 50, 1000)).map((stat) => ({
 				name: stat.name, library: stat.library, selfMs: stat.self * scale, totalMs: stat.total * scale,
-				selfShare: stat.self / tree.samples, totalShare: stat.total / tree.samples,
+				selfShare: stat.self / total, totalShare: stat.total / total,
 			}));
 		},
 	},

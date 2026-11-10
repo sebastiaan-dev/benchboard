@@ -1,11 +1,11 @@
 import { useMemo, useState, type SetStateAction } from "react";
 import { Link } from "react-router";
 import { ArrowRight, Flame, GitCompare } from "lucide-react";
-import { diffFunctions, diffTrees, type CallTree } from "@benchboard/core/profile-tree";
+import { diffFunctions, diffTrees, type CallTree, type Metric } from "@benchboard/core/profile-tree";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { FlameGraph, diffColor, fromDiffTree } from "@/components/bench/flame-graph";
-import { ProfilePairQuery, ThreadControls, ms, useThreadView } from "@/components/bench/profile-tools";
+import { MetricToggle, ProfilePairQuery, ThreadControls, metricLabel, ms, useThreadView } from "@/components/bench/profile-tools";
 import { ErrorState, NotFound } from "@/components/bench/states";
 import { MicroLabel, Panel, PanelHeader, Well } from "@/components/kit/panel";
 import { Segmented } from "@/components/kit/encodings";
@@ -14,7 +14,9 @@ import { useGraphQL } from "@/lib/graphql";
 import { cn } from "@/lib/utils";
 import type { ProfileHeaderFragment } from "@/gql/graphql";
 
-function Side({ title, profile }: { title: string; profile: ProfileHeaderFragment }) {
+const metricMs = (profile: ProfileHeaderFragment, metric: Metric) => metric === "cpu" ? profile.cpuMs : profile.sampledMs;
+
+function Side({ title, profile, metric }: { title: string; profile: ProfileHeaderFragment; metric: Metric }) {
   const m = profile.measurement;
   return (
     <Link to={`/profiles/${profile.id}`} className="bg-well hover:border-foreground/20 grid min-w-0 flex-1 gap-1 rounded-xl border p-3 transition-colors">
@@ -23,7 +25,8 @@ function Side({ title, profile }: { title: string; profile: ProfileHeaderFragmen
         <span className="font-mono">{m.commit?.shortSha.slice(0, 7) ?? "no commit"}{m.dirty ? "+dirty" : ""}</span>
         <span className="text-muted-foreground"> · {m.commit?.subject ?? m.run.title}</span>
       </span>
-      <span className="text-xl font-semibold tracking-tight tabular-nums">{ms(profile.cpuMs)} <span className="text-muted-foreground text-xs font-normal">CPU / iteration</span></span>
+      <span className="text-xl font-semibold tracking-tight tabular-nums">{ms(metricMs(profile, metric))} <span className="text-muted-foreground text-xs font-normal">{metricLabel(metric)} / iteration</span></span>
+      <span className="text-muted-foreground font-mono text-[11px]">{metric === "cpu" ? `${ms(profile.sampledMs)} sampled` : `${ms(profile.cpuMs)} on CPU`}</span>
     </Link>
   );
 }
@@ -45,16 +48,17 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
   const [side, setSide] = useState<"head" | "base">("head");
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState(inline ? 8 : 40);
+  const [metric, setMetric] = useState<Metric>("cpu");
   const baseTree = query.data?.base?.tree as CallTree | undefined;
   const headTree = query.data?.head?.tree as CallTree | undefined;
   const baseThreads = useThreadView(baseTree);
   const headThreads = useThreadView(headTree);
   const iterations = { base: query.data?.base?.iterations ?? 1, head: query.data?.head?.iterations ?? 1 };
-  const diff = useMemo(() => baseThreads.view && headThreads.view ? diffTrees(baseThreads.view, headThreads.view, iterations) : undefined,
-    [baseThreads.view, headThreads.view, iterations.base, iterations.head]);
+  const diff = useMemo(() => baseThreads.view && headThreads.view ? diffTrees(baseThreads.view, headThreads.view, { metric, iterations }) : undefined,
+    [baseThreads.view, headThreads.view, iterations.base, iterations.head, metric]);
   const root = useMemo(() => diff ? fromDiffTree(diff, side) : undefined, [diff, side]);
-  const functions = useMemo(() => baseThreads.view && headThreads.view ? diffFunctions(baseThreads.view, headThreads.view, iterations).slice(0, 1000) : [],
-    [baseThreads.view, headThreads.view, iterations.base, iterations.head]);
+  const functions = useMemo(() => baseThreads.view && headThreads.view ? diffFunctions(baseThreads.view, headThreads.view, { metric, iterations }).slice(0, 1000) : [],
+    [baseThreads.view, headThreads.view, iterations.base, iterations.head, metric]);
 
   if (query.isPending) return <Skeleton className="h-96 rounded-2xl" />;
   if (query.error) return <ErrorState error={query.error} />;
@@ -66,7 +70,7 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
     setThread: (value: SetStateAction<string>) => { baseThreads.setThread(value); headThreads.setThread(value); },
     setMerge: (value: SetStateAction<boolean>) => { baseThreads.setMerge(value); headThreads.setMerge(value); },
   };
-  const total = a.cpuMs ? b.cpuMs / a.cpuMs : 1;
+  const total = metricMs(a, metric) ? metricMs(b, metric) / metricMs(a, metric) : 1;
   const maxDelta = Math.max(1e-9, ...functions.slice(0, rows).map((entry) => Math.abs(entry.headSelfMs - entry.baseSelfMs)));
   const crossMachine = a.measurement.run.machine.hostname !== b.measurement.run.machine.hostname;
 
@@ -75,23 +79,24 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
       <PanelHeader
         icon={GitCompare}
         title={inline ? "Where the time went" : "Differential profile"}
-        subtitle={`Merged by call path · CPU ms per iteration${crossMachine ? " · ⚠ recorded on different machines" : ""}`}
+        subtitle={`Merged by call path · ${metricLabel(metric)} ms per iteration${crossMachine ? " · ⚠ recorded on different machines" : ""}`}
         actions={<>
           {inline && <Button variant="outline" size="sm" asChild><Link to={`/profiles/compare?base=${a.id}&head=${b.id}`}>Open full comparison</Link></Button>}
+          <MetricToggle value={metric} onChange={setMetric} cpuSource={a.cpuSource === "SAMPLE_COUNT" || b.cpuSource === "SAMPLE_COUNT" ? "SAMPLE_COUNT" : "THREAD_CPU_DELTA"} />
           <Segmented value={side} onChange={setSide} options={[{ value: "head", label: "Head widths" }, { value: "base", label: "Base widths" }]} />
         </>}
       />
       <div className="space-y-4 px-4 pb-4">
         <div className="flex flex-wrap items-stretch gap-3">
-          <Side title="Base" profile={a} />
+          <Side title="Base" profile={a} metric={metric} />
           <ArrowRight className="text-muted-foreground size-4 shrink-0 self-center" />
-          <Side title="Head" profile={b} />
+          <Side title="Head" profile={b} metric={metric} />
           <div className="bg-well grid min-w-40 content-start gap-1 rounded-xl border p-3">
-            <MicroLabel>CPU time change</MicroLabel>
+            <MicroLabel>{metricLabel(metric)} time change</MicroLabel>
             <span className={cn("text-2xl font-semibold tracking-tight tabular-nums", total > 1.02 ? "text-bad" : total < 0.98 ? "text-good" : "")}>
               {total >= 1 ? "+" : ""}{((total - 1) * 100).toFixed(1)}%
             </span>
-            <Delta value={b.cpuMs - a.cpuMs} />
+            <Delta value={metricMs(b, metric) - metricMs(a, metric)} />
           </div>
         </div>
         <div className="flex flex-wrap items-center justify-between gap-3">

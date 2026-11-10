@@ -124,8 +124,16 @@ In the web app:
 * The PR matrix marks cells with profiles; a series' panel links straight to the reference → latest
   comparison.
 
-In the terminal: `benchboard profile show <id>` and `benchboard profile diff <base> <head>`.
-CPU time is samples × interval ÷ iterations, summed over threads, so it can exceed wall time.
+In the terminal: `benchboard profile show <id>` and `benchboard profile diff <base> <head>` (`--metric cpu|sampled`).
+
+Every view distinguishes two kinds of time, per iteration and summed over threads (so either can exceed wall time):
+
+* **On-CPU** — from samply's per-sample thread CPU deltas. Sleeping, blocking on locks and waiting for I/O cost
+  (almost) nothing here, so this answers "what burns CPU".
+* **Sampled** — samples × interval, which includes those waits and answers "where does the time go". Profiles
+  without CPU deltas fall back to it and are labelled *CPU (estimated)*.
+
+Stored call trees are re-aggregated from the retained raw profiles when the aggregation changes.
 
 ## Statistics
 

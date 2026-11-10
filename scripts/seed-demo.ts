@@ -148,7 +148,9 @@ const probeStacks = (position: number): SyntheticStack[] => {
 		[[...root, ...gather, "duckdb::GatherResult"], position >= 5 ? 4 : 3],
 		[[...root, "duckdb::DataChunk::Reset"], position >= 7 ? 3 : 5],
 	];
-	return weights.filter(([, weight]) => weight > 0).map(([frames, weight]) => ({ frames, samples: Math.round(weight * 3 * jitter()) }));
+	// Workers also wait for tasks; that time is sampled but not on CPU.
+	const idle = { frames: ["main", "duckdb::TaskScheduler::ExecuteForever", "duckdb::TaskScheduler::WaitForTask|std::condition_variable::wait", "__psynch_cvwait"], samples: Math.round(18 * jitter()), cpu: 0 };
+	return [...weights.filter(([, weight]) => weight > 0).map(([frames, weight]) => ({ frames, samples: Math.round(weight * 3 * jitter()) })), idle];
 };
 const profiles = path.join(home, "demo-profiles");
 fs.mkdirSync(profiles, { recursive: true });
@@ -157,7 +159,7 @@ const probeMeasurements = store.db.query(`SELECT m.id, m.commit_sha AS sha FROM 
 for (const measurement of probeMeasurements) {
 	const position = commits.indexOf(measurement.sha);
 	const workers = Array.from({ length: 4 }, () => ({ name: "duckdb-worker", stacks: probeStacks(position) }));
-	const { profile, syms } = syntheticProfile("engine", [{ name: "main", stacks: [{ frames: ["main", "duckdb::Executor::Run"], samples: 6 }] }, ...workers], "engine");
+	const { profile, syms } = syntheticProfile("engine", [{ name: "main", stacks: [{ frames: ["main", "duckdb::Executor::Run"], samples: 6 }] }, ...workers], "engine", { cpuDeltas: true });
 	const file = path.join(profiles, `probe-${position}.json.gz`);
 	fs.writeFileSync(file, Bun.gzipSync(new TextEncoder().encode(JSON.stringify(profile))));
 	fs.writeFileSync(file.replace(/\.gz$/, "").replace(/\.json$/, ".json.syms.json"), JSON.stringify(syms));

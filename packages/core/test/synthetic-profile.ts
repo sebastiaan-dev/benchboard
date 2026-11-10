@@ -6,6 +6,8 @@ export interface SyntheticStack {
 	/** Outermost first. `"outer|inner"` is one native frame where `inner` was inlined into `outer`. */
 	frames: string[];
 	samples: number;
+	/** Fraction of each sample spent on CPU (default 1); 0 models waiting or sleeping. */
+	cpu?: number;
 }
 
 export interface SyntheticThread {
@@ -13,7 +15,7 @@ export interface SyntheticThread {
 	stacks: SyntheticStack[];
 }
 
-export function syntheticProfile(product: string, threads: SyntheticThread[], library = product) {
+export function syntheticProfile(product: string, threads: SyntheticThread[], library = product, options: { cpuDeltas?: boolean } = {}) {
 	const breakpadId = "4A1E0B5C9D2F4E6A8B7C1D3E5F708192" + "0";
 	const symbols = new Map<string, { rva: number; size: number; frames: string[] }>();
 	let next = 0x1000;
@@ -39,7 +41,8 @@ export function syntheticProfile(product: string, threads: SyntheticThread[], li
 		const funcTable = { length: 0, name: [] as number[], isJS: [] as boolean[], relevantForJS: [] as boolean[], resource: [] as number[],
 			fileName: [] as null[], lineNumber: [] as null[], columnNumber: [] as null[] };
 		const stackTable = { length: 0, prefix: [] as (number | null)[], frame: [] as number[], category: [] as number[], subcategory: [] as number[] };
-		const samples = { length: 0, weightType: "samples", stack: [] as number[], time: [] as number[], weight: [] as number[] };
+		const samples = { length: 0, weightType: "samples", stack: [] as number[], time: [] as number[], weight: [] as number[],
+			...(options.cpuDeltas ? { threadCPUDelta: [] as number[] } : {}) };
 		const frameIndex = new Map<number, number>();
 		const stackIndex = new Map<string, number>();
 		const frameOf = (address: number) => {
@@ -74,6 +77,8 @@ export function syntheticProfile(product: string, threads: SyntheticThread[], li
 			});
 			for (let i = 0; i < stack.samples; i++) {
 				samples.stack.push(prefix!); samples.time.push(time += 1); samples.weight.push(1); samples.length++;
+				// samply reports CPU deltas in µs since the thread's previous sample (interval = 1 ms).
+				samples.threadCPUDelta?.push(Math.round(1000 * (stack.cpu ?? 1)));
 			}
 		}
 		string(library);
@@ -88,6 +93,7 @@ export function syntheticProfile(product: string, threads: SyntheticThread[], li
 	});
 	const profile = {
 		meta: { version: 24, preprocessedProfileVersion: 49, interval: 1, startTime: 0, product, symbolicated: false,
+			sampleUnits: { time: "ms", eventDelay: "ms", threadCPUDelta: "µs" },
 			categories: [{ name: "Other", color: "grey", subcategories: ["Other"] }, { name: "User", color: "yellow", subcategories: ["Other"] }] },
 		libs: [{ name: library, debugName: library, breakpadId, codeId: breakpadId.slice(0, 32), path: `/opt/${library}`, debugPath: `/opt/${library}`, arch: "arm64" }],
 		threads: profileThreads, pages: [], counters: [], profilerOverhead: [],

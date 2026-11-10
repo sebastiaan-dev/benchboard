@@ -14,7 +14,7 @@ type Query {
   machine(id: ID!): Machine
   profile(id: ID!): Profile
   "Per-function CPU-time change between two profiles (e.g. reference and head of a series)."
-  profileDiff(base: ID!, head: ID!, limit: Int = 200): ProfileDiff!
+  profileDiff(base: ID!, head: ID!, limit: Int = 200, metric: ProfileMetric = CPU): ProfileDiff!
   "Runs across all repositories, newest first."
   runs(limit: Int = 50, offset: Int = 0): [Run!]!
 }
@@ -292,8 +292,11 @@ type Profile {
   samples: Int!
   intervalMs: Float!
   durationMs: Float
-  "Sampled CPU time per iteration: samples × interval / iterations."
+  "On-CPU time per iteration, summed over threads (from samply's per-sample CPU deltas; see cpuSource)."
   cpuMs: Float!
+  "Sampled time per iteration (samples × interval), summed over threads; includes waiting, sleeping and blocking."
+  sampledMs: Float!
+  cpuSource: CpuSource!
   threads: [ProfileThread!]!
   "Share of sampled frames that resolved to symbols (needs samply --unstable-presymbolicate)."
   symbolicatedShare: Float!
@@ -308,7 +311,7 @@ type Profile {
   firefoxProfilerUrl(origin: String!): String!
   "Aggregated call tree (see @benchboard/core CallTree)."
   tree: JSON!
-  topFunctions(limit: Int = 50, by: ProfileSort = SELF): [ProfileFunction!]!
+  topFunctions(limit: Int = 50, by: ProfileSort = SELF, metric: ProfileMetric = CPU): [ProfileFunction!]!
   "Other profiles of the same benchmark case (other commits or runs), newest first."
   related: [Profile!]!
 }
@@ -318,9 +321,26 @@ enum ProfileSort {
   TOTAL
 }
 
+"CPU: time on CPU. SAMPLED: sampled time including off-CPU waiting (where wall time goes)."
+enum ProfileMetric {
+  CPU
+  SAMPLED
+}
+
+enum CpuSource {
+  "Measured from per-sample thread CPU deltas."
+  THREAD_CPU_DELTA
+  "Estimated from sample counts because the profile has no CPU deltas; includes off-CPU time."
+  SAMPLE_COUNT
+}
+
 type ProfileThread {
   name: String!
   samples: Int!
+  "Per iteration."
+  cpuMs: Float!
+  "Per iteration."
+  sampledMs: Float!
 }
 
 type ProfileFunction {
@@ -335,8 +355,10 @@ type ProfileFunction {
 type ProfileDiff {
   base: Profile!
   head: Profile!
-  baseCpuMs: Float!
-  headCpuMs: Float!
+  metric: ProfileMetric!
+  "Per iteration, in the chosen metric."
+  baseMs: Float!
+  headMs: Float!
   functions: [ProfileFunctionDelta!]!
 }
 

@@ -150,6 +150,13 @@ const MIGRATIONS: string[] = [
 	);
 	CREATE INDEX profile_measurement ON profile (measurement_id);
 	`,
+	`
+	-- Separate on-CPU from sampled (wall) time; trees older than tree_version 2 are re-aggregated from raw files.
+	ALTER TABLE profile ADD COLUMN cpu_ms REAL NOT NULL DEFAULT 0;
+	ALTER TABLE profile ADD COLUMN sampled_ms REAL NOT NULL DEFAULT 0;
+	ALTER TABLE profile ADD COLUMN cpu_source TEXT NOT NULL DEFAULT 'sample-count';
+	ALTER TABLE profile ADD COLUMN tree_version INTEGER NOT NULL DEFAULT 1;
+	`,
 ];
 
 export function openDatabase(file: string): Database {

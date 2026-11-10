@@ -1,13 +1,13 @@
 import { useMemo, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { Download, ExternalLink, Flame, GitCompare, ListOrdered } from "lucide-react";
-import { functionStats, sampleMs, type CallTree } from "@benchboard/core/profile-tree";
+import { functionStats, metricTotal, type CallTree, type Metric } from "@benchboard/core/profile-tree";
 import { graphql } from "@/gql";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { FlameGraph, fromCallTree } from "@/components/bench/flame-graph";
-import { ThreadControls, ms, useThreadView } from "@/components/bench/profile-tools";
+import { MetricToggle, ThreadControls, metricLabel, ms, useThreadView } from "@/components/bench/profile-tools";
 import { ErrorState, Hint, LoadingState, NotFound } from "@/components/bench/states";
 import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { Panel, PanelHeader, Stat, StatStrip, Well } from "@/components/kit/panel";
@@ -32,19 +32,21 @@ export function ProfilePage() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"self" | "total">("self");
   const [rows, setRows] = useState(40);
+  const [metric, setMetric] = useState<Metric>("cpu");
   const query = useGraphQL(ProfileQuery, { id, origin: window.location.origin });
   const profile = query.data?.profile;
   const tree = profile?.tree as CallTree | undefined;
   const threads = useThreadView(tree);
   useRepositoryScope(profile?.measurement.benchmark.repository.id);
-  const root = useMemo(() => threads.view && profile ? fromCallTree(threads.view, sampleMs(threads.view, profile.iterations)) : undefined, [threads.view, profile]);
-  const stats = useMemo(() => threads.view ? functionStats(threads.view).sort((a, b) => b[sort] - a[sort]).slice(0, 1000) : [], [threads.view, sort]);
+  const root = useMemo(() => threads.view && profile ? fromCallTree(threads.view, metric, profile.iterations) : undefined, [threads.view, profile, metric]);
+  const stats = useMemo(() => threads.view ? functionStats(threads.view, metric).sort((a, b) => b[sort] - a[sort]).slice(0, 1000) : [], [threads.view, sort, metric]);
 
   if (query.isPending) return <LoadingState rows={2} />;
   if (query.error) return <ErrorState error={query.error} />;
   if (!profile || !tree || !root || !threads.view) return <NotFound what="profile" />;
   const m = profile.measurement;
-  const scale = sampleMs(threads.view, profile.iterations);
+  const scale = 1 / profile.iterations;
+  const viewTotal = metricTotal(threads.view, metric) || 1;
   const repository = m.benchmark.repository;
   const maxSelf = Math.max(1, ...stats.slice(0, rows).map((stat) => stat[sort]));
 
@@ -89,19 +91,23 @@ export function ProfilePage() {
       </div>
 
       <Panel>
-        <StatStrip className="sm:grid-cols-3 xl:grid-cols-5">
-          <Stat label="CPU / iteration" value={ms(profile.cpuMs)} detail={`${profile.iterations} iteration${profile.iterations > 1 ? "s" : ""} · all threads`} />
-          <Stat label="Wall median (hyperfine)" value={m.median ? ms(m.median * 1000) : "—"} detail="from the measured case" />
-          <Stat label="Samples" value={profile.samples.toLocaleString()} detail={`every ${profile.intervalMs} ms`} />
-          <Stat label="Threads" value={profile.threads.length} detail={profile.threads[0]?.name} />
+        <StatStrip className="sm:grid-cols-2 xl:grid-cols-4">
+          <Stat label={profile.cpuSource === "SAMPLE_COUNT" ? "CPU (estimated)" : "On-CPU / iteration"} value={ms(profile.cpuMs)}
+            tone={profile.cpuSource === "SAMPLE_COUNT" ? "warn" : undefined}
+            detail={profile.cpuSource === "SAMPLE_COUNT" ? "no CPU deltas: includes waiting" : `all threads · ${profile.iterations} iteration${profile.iterations > 1 ? "s" : ""}`} />
+          <Stat label="Sampled / iteration" value={ms(profile.sampledMs)} detail={profile.sampledMs > profile.cpuMs * 1.05 ? `${ms(profile.sampledMs - profile.cpuMs)} off-CPU` : "mostly on CPU"} />
+          <Stat label="Wall median (hyperfine)" value={m.median ? ms(m.median * 1000) : "—"} detail={`${profile.samples.toLocaleString()} samples every ${profile.intervalMs} ms`} />
           <Stat label="Symbolicated" value={`${(profile.symbolicatedShare * 100).toFixed(1)}%`} tone={profile.symbolicatedShare < 0.9 ? "warn" : undefined}
             detail={profile.hasSymbols ? ".syms.json sidecar" : "no sidecar"} />
         </StatStrip>
       </Panel>
 
       <Panel>
-        <PanelHeader icon={Flame} title="Flame graph" subtitle="Widths are CPU time per iteration · inlined frames expanded · click to zoom"
-          actions={<Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Highlight functions…" className="h-8 w-56" />} />
+        <PanelHeader icon={Flame} title="Flame graph" subtitle={`Widths are ${metricLabel(metric)} time per iteration · inlined frames expanded · click to zoom`}
+          actions={<>
+            <MetricToggle value={metric} onChange={setMetric} cpuSource={profile.cpuSource} />
+            <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Highlight functions…" className="h-8 w-56" />
+          </>} />
         <div className="space-y-3 px-4 pb-4">
           <ThreadControls tree={tree} state={threads} />
           <FlameGraph root={root} search={search} />
@@ -109,7 +115,7 @@ export function ProfilePage() {
       </Panel>
 
       <Panel>
-        <PanelHeader icon={ListOrdered} title="Hottest functions" subtitle="Self: in the function itself · Total: anywhere on the stack (recursion counted once)"
+        <PanelHeader icon={ListOrdered} title="Hottest functions" subtitle={`${metricLabel(metric)} ms per iteration · Self: in the function itself · Total: anywhere on the stack (recursion counted once) · % of ${ms(viewTotal * scale)}`}
           actions={<Segmented value={sort} onChange={setSort} options={[{ value: "self", label: "Self" }, { value: "total", label: "Total" }]} />} />
         <div className="px-4 pb-4">
           <Well className="overflow-hidden">
