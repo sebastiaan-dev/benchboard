@@ -5,7 +5,7 @@ import { parseArgs, stripVTControlCharacters, styleText } from "node:util";
 import { spawn } from "node:child_process";
 import { graphql } from "graphql";
 import {
-	Store, diffFunctions, functionStats, importLegacy, pullRequestReport, type Profile, type PullRequest, type PullRequestReport, type Measurement, type Comparison,
+	Store, diffFunctions, parsePullRequestReference, functionStats, importLegacy, pullRequestReport, type Profile, type PullRequest, type PullRequestReport, type Measurement, type Comparison,
 	type Repository,
 } from "@benchboard/core";
 import { createSchema, typeDefs } from "@benchboard/graphql";
@@ -21,7 +21,8 @@ Usage:
       --title <text>         Human-readable title
       --commit <rev>         Revision measured by every case (default: checkout HEAD)
       --dirty | --clean      Whether the measured build had uncommitted changes
-      --pr <ref>             Also track a GitHub PR (123, owner/name#123, URL)
+      --pr <ref>             Also track a GitHub PR (123, owner/name#123, URL); if tracking
+                             fails the run stays saved and the exit code is 3
       --track-branch         Also track the current branch as a local PR
       --measured-on <host>   Hostname of the machine that ran the benchmark, if not this one
       --allow-duplicate      Record an export that was already ingested
@@ -51,6 +52,9 @@ Usage:
 
 Common options: --cwd <dir>  --json  --home <dir> (or BENCHBOARD_HOME)
 PR refs: a number (GitHub PR in this repository), a local branch name, or id:<n>.`;
+
+/** The run was saved but PR/branch tracking failed; do not re-ingest, retry tracking instead. */
+export const EXIT_SAVED_TRACKING_FAILED = 3;
 
 const json = (value: unknown) => process.stdout.write(JSON.stringify(value, null, 2) + "\n");
 const clean = (value: string) => stripVTControlCharacters(value).replace(/[\x00-\x1f\x7f-\x9f]/g, " ");
@@ -222,13 +226,24 @@ export async function main(argv: string[]): Promise<number> {
 				};
 				for (const [key, value] of Object.entries(overrides)) if (value !== undefined) metadata[key] = value;
 				if (options["measured-on"]) metadata.machine = { ...(metadata.machine as object | undefined), hostname: options["measured-on"] };
-				const result = store.ingest({ file: rest[0], cwd, metadata, allowDuplicate: options["allow-duplicate"] });
-				const tracked: PullRequest[] = [];
 				const pullRequest = metadata.pullRequest as string | number | undefined;
-				if (pullRequest !== undefined) tracked.push(await store.syncGithubPullRequest({ cwd, reference: pullRequest }));
-				if (options["track-branch"]) tracked.push(store.syncLocalBranch({ cwd, base: options.base }));
+				// Reject malformed references before anything is saved.
+				if (pullRequest !== undefined) parsePullRequestReference(String(pullRequest));
+				const result = store.ingest({ file: rest[0], cwd, metadata, allowDuplicate: options["allow-duplicate"] });
+				// The run is durable from here on: tracking failures are reported alongside it, never instead of it.
+				const tracked: PullRequest[] = [];
+				const trackingErrors: string[] = [];
+				const attempt = async (what: string, track: () => Promise<PullRequest> | PullRequest) => {
+					try {
+						tracked.push(await track());
+					} catch (error) {
+						trackingErrors.push(`${what}: ${(error as Error).message}`);
+					}
+				};
+				if (pullRequest !== undefined) await attempt(`pull request ${pullRequest}`, () => store.syncGithubPullRequest({ cwd, reference: pullRequest }));
+				if (options["track-branch"]) await attempt("branch", () => store.syncLocalBranch({ cwd, base: options.base }));
 				if (options.json) {
-					json({ ...result, pullRequests: tracked, url: `http://localhost:${DEFAULT_PORT}/runs/${result.run.id}` });
+					json({ ...result, pullRequests: tracked, trackingErrors, url: `http://localhost:${DEFAULT_PORT}/runs/${result.run.id}` });
 				} else {
 					console.log(`Saved run ${result.run.id} → ${result.repository.slug} / ${result.benchmark.key}`);
 					for (const m of result.measurements) {
@@ -237,6 +252,11 @@ export async function main(argv: string[]): Promise<number> {
 					}
 					for (const warning of result.warnings) console.log(color("yellow", `warning: ${warning}`));
 					for (const pr of tracked) console.log(`Tracking ${prName(pr)} (id ${pr.id}): benchboard pr report id:${pr.id}`);
+				}
+				if (trackingErrors.length) {
+					for (const error of trackingErrors) console.error(`benchboard: run ${result.run.id} was saved, but tracking failed (${error}).`);
+					console.error(pullRequest !== undefined ? `Retry with: benchboard pr track ${pullRequest}` : "Retry with: benchboard pr track --branch");
+					return EXIT_SAVED_TRACKING_FAILED;
 				}
 				return 0;
 			}

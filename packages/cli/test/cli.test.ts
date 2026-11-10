@@ -166,3 +166,21 @@ test("CLI: attach samply profiles and compare them", () => {
 	const query = JSON.parse(cli("query", "{ profileDiff(base: 1, head: 2, limit: 1) { headMs functions { name deltaSelfMs } } }").stdout);
 	assert.deepEqual(query.data.profileDiff, { headMs: 10, functions: [{ name: "CompareKeys", deltaSelfMs: -45 }] });
 });
+
+test("CLI: a failed PR lookup after ingest keeps the run and says how to retry", () => {
+	const { root, cli } = setup(t);
+	const exportFile = path.join(root, "bench.json");
+	fs.writeFileSync(exportFile, JSON.stringify({ results: [{ command: "x", times: series(1), exit_codes: series(1).map(() => 0) }] }));
+	const malformed = cli("ingest", exportFile, "--pr", "not a ref", "--json");
+	assert.equal(malformed.code, 1);
+	assert.match(malformed.stderr, /Unrecognized pull request reference/);
+	assert.equal(JSON.parse(cli("query", "{ runs { id } }").stdout).data.runs.length, 0, "nothing saved for a malformed reference");
+	// A well-formed reference that cannot be resolved (no GitHub remote): saved, exit 3, retry hint.
+	const failed = cli("ingest", exportFile, "--pr", "123", "--json");
+	assert.equal(failed.code, 3, failed.stderr);
+	const output = JSON.parse(failed.stdout);
+	assert.ok(output.run.id);
+	assert.match(output.trackingErrors[0], /pull request 123/);
+	assert.match(failed.stderr, /was saved, but tracking failed[\s\S]*Retry with: benchboard pr track 123/);
+	assert.equal(JSON.parse(cli("query", "{ runs { id } }").stdout).data.runs[0].id, output.run.id);
+});
