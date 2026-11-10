@@ -355,7 +355,7 @@ export async function main(argv: string[]): Promise<number> {
 				if (rest.length !== 1) throw new Error("Usage: benchboard query <graphql|@file> [--variables json]");
 				const source = rest[0].startsWith("@") ? fs.readFileSync(rest[0].slice(1), "utf8") : rest[0];
 				const variableValues = options.variables ? JSON.parse(options.variables) : undefined;
-				const result = await graphql({ schema: createSchema(), source, variableValues, contextValue: { store } });
+				const result = await graphql({ schema: createSchema(), source, variableValues, contextValue: { store, mayMutate: true } });
 				json(result);
 				return result.errors?.length ? 1 : 0;
 			}

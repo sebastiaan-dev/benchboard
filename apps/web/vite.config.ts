@@ -12,6 +12,7 @@ export default defineConfig({
     port: 5319,
     proxy: {
       "/graphql": { target: "http://localhost:4319", changeOrigin: false },
+      "/api": { target: "http://localhost:4319", changeOrigin: false },
       // Raw profiles and the symbol endpoint used by the Firefox Profiler (the page route /profiles/:id stays in Vite).
       "^/profiles/\\d+/(profile\\.json\\.gz|symbols)": { target: "http://localhost:4319", changeOrigin: false },
     },

@@ -8,7 +8,7 @@
   },
   "scripts": {
     "typecheck": "tsc -p .",
-    "dev": "bun --watch bin/benchboard.ts serve"
+    "dev": "BENCHBOARD_ALLOWED_ORIGINS=http://localhost:5319 bun --watch bin/benchboard.ts serve"
   },
   "dependencies": {
     "@benchboard/core": "workspace:*",

@@ -109,6 +109,28 @@ test("CLI: serve exposes GraphQL on localhost only", async () => {
 			.on("error", reject).end();
 	});
 	assert.equal(status, 421);
+
+	// Cross-origin pages can neither read nor mutate: refused before any resolver runs, without CORS headers.
+	const mutation = JSON.stringify({ query: "mutation { deleteRun(id: \"x\") }" });
+	const foreign = await fetch(`http://127.0.0.1:${port}/graphql`, {
+		method: "POST", headers: { "content-type": "application/json", origin: "https://untrusted.example" }, body: mutation,
+	});
+	assert.equal(foreign.status, 403);
+	assert.equal(foreign.headers.get("access-control-allow-origin"), null);
+	const preflight = await fetch(`http://127.0.0.1:${port}/graphql`, { method: "OPTIONS", headers: { origin: "https://untrusted.example" } });
+	assert.equal(preflight.status, 403);
+	const session = await fetch(`http://127.0.0.1:${port}/api/session`, { headers: { origin: "https://untrusted.example" } });
+	assert.equal(session.status, 403);
+	// Same-origin requests still need the session token to mutate.
+	const anonymous = await (await fetch(`http://127.0.0.1:${port}/graphql`, {
+		method: "POST", headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` }, body: mutation,
+	})).json() as { errors: { message: string }[] };
+	assert.match(anonymous.errors[0].message, /session token/);
+	const { token } = await (await fetch(`http://127.0.0.1:${port}/api/session`)).json() as { token: string };
+	const authorized = await (await fetch(`http://127.0.0.1:${port}/graphql`, {
+		method: "POST", headers: { "content-type": "application/json", "x-benchboard-token": token }, body: mutation,
+	})).json() as { data: { deleteRun: boolean } };
+	assert.deepEqual(authorized.data, { deleteRun: false });
 });
 
 test("CLI: attach samply profiles and compare them", () => {

@@ -9,13 +9,30 @@ export class GraphQLRequestError extends Error {
   }
 }
 
+let session: Promise<string> | null = null;
+
+/** The server's per-process token authorizes mutations; it is only readable same-origin. */
+function sessionToken(): Promise<string> {
+  session ??= fetch("/api/session").then(async (response) => {
+    if (!response.ok) throw new Error(`Could not start a session (HTTP ${response.status}).`);
+    return ((await response.json()) as { token: string }).token;
+  }).catch((error) => {
+    session = null;
+    throw error;
+  });
+  return session;
+}
+
 export async function request<TResult, TVariables>(
   document: TypedDocumentString<TResult, TVariables>,
   variables?: TVariables,
 ): Promise<TResult> {
   const response = await fetch("/graphql", {
     method: "POST",
-    headers: { "content-type": "application/json", accept: "application/graphql-response+json, application/json" },
+    headers: {
+      "content-type": "application/json", accept: "application/graphql-response+json, application/json",
+      "x-benchboard-token": await sessionToken(),
+    },
     body: JSON.stringify({ query: document.toString(), variables }),
   });
   const body = (await response.json().catch(() => null)) as { data?: TResult; errors?: { message: string }[] } | null;

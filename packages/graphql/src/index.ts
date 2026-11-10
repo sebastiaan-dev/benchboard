@@ -10,6 +10,14 @@ export const typeDefs = readFileSync(new URL("../schema.graphql", import.meta.ur
 
 export interface Context {
 	store: Store;
+	/** Whether the caller may run mutations: true in-process, or with the server's session token over HTTP. */
+	mayMutate: boolean;
+}
+
+function authorize(context: Context) {
+	if (!context.mayMutate) {
+		throw new Error("Mutations require the server session token (sent automatically by the Benchboard web app).");
+	}
 }
 
 type Args = Record<string, any>;
@@ -81,11 +89,22 @@ export const resolvers = {
 		},
 	},
 	Mutation: {
-		syncPullRequest: (_: unknown, args: Args, { store }: Context) => store.resyncPullRequest(id(args.id)),
-		trackGithubPullRequest: (_: unknown, args: Args, { store }: Context) =>
-			store.syncGithubPullRequest({ repositoryId: id(args.repository), reference: args.reference }),
-		deleteRun: (_: unknown, args: Args, { store }: Context) => store.deleteRun(String(args.id)),
-		deleteProfile: (_: unknown, args: Args, { store }: Context) => store.deleteProfile(id(args.id)),
+		syncPullRequest: (_: unknown, args: Args, context: Context) => {
+			authorize(context);
+			return context.store.resyncPullRequest(id(args.id));
+		},
+		trackGithubPullRequest: (_: unknown, args: Args, context: Context) => {
+			authorize(context);
+			return context.store.syncGithubPullRequest({ repositoryId: id(args.repository), reference: args.reference });
+		},
+		deleteRun: (_: unknown, args: Args, context: Context) => {
+			authorize(context);
+			return context.store.deleteRun(String(args.id));
+		},
+		deleteProfile: (_: unknown, args: Args, context: Context) => {
+			authorize(context);
+			return context.store.deleteProfile(id(args.id));
+		},
 	},
 	ProfileSort: { SELF: "self", TOTAL: "total" },
 	Profile: {
