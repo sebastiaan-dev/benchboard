@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router";
 import { ArrowRight } from "lucide-react";
 import { diffFunctions, diffTrees, type CallTree } from "@benchboard/core/profile-tree";
 import { graphql } from "@/gql";
+import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -51,6 +52,7 @@ export function ProfileComparePage() {
   const query = useGraphQL(CompareQuery, { base, head }, { enabled: Boolean(base && head) });
   const [side, setSide] = useState<"head" | "base">("head");
   const [search, setSearch] = useState("");
+  const [rows, setRows] = useState(50);
   const baseTree = query.data?.base?.tree as CallTree | undefined;
   const headTree = query.data?.head?.tree as CallTree | undefined;
   const baseThreads = useThreadView(baseTree);
@@ -61,7 +63,7 @@ export function ProfileComparePage() {
   const diff = useMemo(() => baseThreads.view && syncedHead ? diffTrees(baseThreads.view, syncedHead, iterations) : undefined,
     [baseThreads.view, syncedHead, iterations.base, iterations.head]);
   const root = useMemo(() => diff ? fromDiffTree(diff, side) : undefined, [diff, side]);
-  const functions = useMemo(() => baseThreads.view && syncedHead ? diffFunctions(baseThreads.view, syncedHead, iterations).slice(0, 150) : [],
+  const functions = useMemo(() => baseThreads.view && syncedHead ? diffFunctions(baseThreads.view, syncedHead, iterations).slice(0, 1000) : [],
     [baseThreads.view, syncedHead, iterations.base, iterations.head]);
 
   if (!base || !head) return <NotFound what="comparison" />;
@@ -148,7 +150,7 @@ export function ProfileComparePage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {functions.map((entry) => (
+              {functions.slice(0, rows).map((entry) => (
                 <TableRow key={`${entry.name}\0${entry.library}`} className="cursor-pointer" onClick={() => setSearch(entry.name)}>
                   <TableCell className="text-right">{change(entry.baseSelfMs, entry.headSelfMs)}</TableCell>
                   <TableCell className="text-right font-mono tabular-nums">
@@ -165,6 +167,9 @@ export function ProfileComparePage() {
               ))}
             </TableBody>
           </Table>
+          {functions.length > rows && (
+            <Button variant="ghost" size="sm" className="mt-2" onClick={() => setRows(rows + 100)}>Show more ({functions.length - rows} hidden)</Button>
+          )}
         </CardContent>
       </Card>
     </div>

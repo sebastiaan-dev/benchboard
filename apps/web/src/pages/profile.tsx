@@ -107,13 +107,14 @@ export function ProfilePage() {
   const { id = "" } = useParams();
   const navigate = useNavigate();
   const [search, setSearch] = useState("");
+  const [rows, setRows] = useState(50);
   const [sort, setSort] = useState<"self" | "total">("self");
   const query = useGraphQL(ProfileQuery, { id, origin: window.location.origin });
   const profile = query.data?.profile;
   const tree = profile?.tree as CallTree | undefined;
   const threads = useThreadView(tree);
   const root = useMemo(() => threads.view && profile ? fromCallTree(threads.view, sampleMs(threads.view, profile.iterations)) : undefined, [threads.view, profile]);
-  const stats = useMemo(() => threads.view ? functionStats(threads.view).sort((a, b) => b[sort] - a[sort]).slice(0, 100) : [], [threads.view, sort]);
+  const stats = useMemo(() => threads.view ? functionStats(threads.view).sort((a, b) => b[sort] - a[sort]).slice(0, 1000) : [], [threads.view, sort]);
 
   if (query.isPending) return <LoadingState rows={2} />;
   if (query.error) return <ErrorState error={query.error} />;
@@ -230,7 +231,7 @@ export function ProfilePage() {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {stats.map((stat) => (
+              {stats.slice(0, rows).map((stat) => (
                 <TableRow key={`${stat.name}\0${stat.library}`} className="cursor-pointer" onClick={() => setSearch(stat.name)}>
                   <TableCell className="text-right font-mono tabular-nums">
                     {ms(stat.self * scale)} <span className="text-muted-foreground text-xs">{((stat.self / threads.view!.samples) * 100).toFixed(1)}%</span>
@@ -244,6 +245,9 @@ export function ProfilePage() {
               ))}
             </TableBody>
           </Table>
+          {stats.length > rows && (
+            <Button variant="ghost" size="sm" className="mt-2" onClick={() => setRows(rows + 100)}>Show more ({stats.length - rows} hidden)</Button>
+          )}
         </CardContent>
       </Card>
     </div>
