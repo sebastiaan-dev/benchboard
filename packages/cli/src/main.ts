@@ -35,7 +35,8 @@ Usage:
                                               Execute a GraphQL document locally; prints JSON
   benchboard schema                           Print the GraphQL schema
   benchboard serve [--port ${DEFAULT_PORT}] [--host 127.0.0.1] [--open]
-  benchboard open [pr <ref>] [--port ${DEFAULT_PORT}]
+  benchboard open [pr <ref> | run <id>] [--port ${DEFAULT_PORT}]
+                                              Open the dashboard, starting a background server if needed
   benchboard import-legacy [dir]              Import pi /bench runs (~/.pi/agent/benchmarks)
 
 Common options: --cwd <dir>  --json  --home <dir> (or BENCHBOARD_HOME)
@@ -132,6 +133,32 @@ function printReport(store: Store, report: PullRequestReport) {
 				`  Δprev ${verdictText(point.vsPrevious)}${extra}`);
 		}
 	}
+}
+
+async function reachable(port: number): Promise<boolean> {
+	try {
+		const response = await fetch(`http://127.0.0.1:${port}/graphql?query=%7B__typename%7D`, { signal: AbortSignal.timeout(1000) });
+		return response.ok;
+	} catch {
+		return false;
+	}
+}
+
+/** Starts a detached `serve` for the same data directory unless one already answers on the port. */
+async function ensureServer(home: string, port: number, explicitHome: string | undefined) {
+	if (await reachable(port)) return;
+	fs.mkdirSync(home, { recursive: true, mode: 0o700 });
+	const log = fs.openSync(path.join(home, "serve.log"), "a");
+	const args = [process.argv[1], "serve", "--port", String(port), ...(explicitHome ? ["--home", explicitHome] : [])];
+	spawn(process.execPath, args, { detached: true, stdio: ["ignore", log, log], env: { ...process.env, BENCHBOARD_HOME: home } }).unref();
+	for (let attempt = 0; attempt < 50; attempt++) {
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		if (await reachable(port)) {
+			console.error(`Started benchboard server on port ${port} (log: ${path.join(home, "serve.log")}).`);
+			return;
+		}
+	}
+	throw new Error(`The server did not start; see ${path.join(home, "serve.log")}.`);
 }
 
 async function serve(store: Store, host: string, port: number, openBrowser: boolean): Promise<number> {
@@ -259,6 +286,7 @@ export async function main(argv: string[]): Promise<number> {
 				return await serve(store, options.host ?? "127.0.0.1", Number(options.port ?? DEFAULT_PORT), options.open ?? false);
 			case "open": {
 				const port = Number(options.port ?? DEFAULT_PORT);
+				await ensureServer(store.home, port, options.home);
 				let route = "/";
 				if (rest[0] === "pr" && rest[1]) route = `/pr/${resolvePullRequest(store, cwd, rest[1]).id}`;
 				else if (rest[0] === "run" && rest[1]) route = `/runs/${rest[1]}`;
