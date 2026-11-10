@@ -12,7 +12,7 @@ import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
 import { DeltaPill, SegmentedBar, Sparkline, verdictVar } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
-import { dateTime, duration, relativeTime, seriesName, verdictLabel } from "@/lib/format";
+import { dateTime, duration, primaryMachine, relativeTime, seriesName, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RepositoryPageQuery } from "@/gql/graphql";
 
@@ -32,7 +32,7 @@ const RepositoryPageQueryDocument = graphql(`
       }
       benchmarks {
         id key title
-        cases { caseKey count lastRecordedAt measurements(limit: 30) { id median commitSha dirty status recordedAt } }
+        cases { caseKey count lastRecordedAt measurements(limit: 60) { id median commitSha dirty status recordedAt run { machine { id hostname } } } }
       }
       runs(limit: $runs) { ...RunRow }
       profiles(limit: $profiles) {
@@ -140,7 +140,13 @@ function BenchmarkRows({ repository, limit }: { repository: Repository; limit?: 
         <span>Series</span><span>Recent medians</span><span className="text-right">Latest</span><span className="text-right">Runs</span><span className="text-right">Recorded</span>
       </div>
       {rows.map(({ benchmark, entry }) => {
-        const last = entry.measurements.at(-1);
+        // One cohort per sparkline: the latest clean, passing measurement's machine. Other machines and
+        // dirty or failed builds are not comparable, so they are left out rather than joined into one line.
+        const eligible = entry.measurements.filter((m) => !m.dirty && m.status !== "FAILED");
+        const machine = primaryMachine(entry.measurements);
+        const cohort = eligible.filter((m) => m.run.machine.id === machine).slice(-30);
+        const last = cohort.at(-1) ?? entry.measurements.at(-1);
+        const machines = new Set(entry.measurements.map((m) => m.run.machine.id)).size;
         return (
           <Link key={`${benchmark.id}:${entry.caseKey}`} to={`/benchmarks/${benchmark.id}?case=${encodeURIComponent(entry.caseKey)}`}
             className="hover:bg-accent/50 grid grid-cols-[minmax(0,1fr)_8rem_6rem_4rem_6rem] items-center gap-4 rounded-lg px-3 py-2">
@@ -148,7 +154,12 @@ function BenchmarkRows({ repository, limit }: { repository: Repository; limit?: 
               <span className="text-muted-foreground block truncate font-mono text-[11px]">{benchmark.key}</span>
               <span className="block truncate text-sm">{entry.caseKey === "default" ? benchmark.title ?? benchmark.key : entry.caseKey}</span>
             </span>
-            <Sparkline values={entry.measurements.map((m) => m.median)} width={128} height={22} color="var(--info)" />
+            <span className="grid gap-0.5" title={`${cohort.length} clean measurements on ${last?.run.machine.hostname ?? "?"}`}>
+              <Sparkline values={cohort.map((m) => m.median)} width={128} height={22} color="var(--info)" />
+              <span className="text-muted-foreground truncate font-mono text-[10px]">
+                {last?.run.machine.hostname}{machines > 1 ? ` · +${machines - 1} other machine${machines > 2 ? "s" : ""}` : ""}
+              </span>
+            </span>
             <span className="text-right font-mono text-sm tabular-nums">{last ? duration(last.median) : "—"}</span>
             <span className="text-muted-foreground text-right font-mono text-xs">{entry.count}</span>
             <span className="text-muted-foreground text-right text-xs">{relativeTime(entry.lastRecordedAt)}</span>

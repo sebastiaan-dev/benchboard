@@ -89,3 +89,15 @@ export function changeBackground(ratio: number, verdict: Verdict | null, maxChan
 export function seriesName(benchmarkKey: string, caseKey: string): string {
   return caseKey === "default" ? benchmarkKey : `${benchmarkKey} · ${caseKey}`;
 }
+
+/** The machine with the most clean, passing measurements (latest wins ties): the default comparable cohort. */
+export function primaryMachine<T extends { dirty: boolean | null; status: string; run: { machine: { id: string } } }>(measurements: T[]): string | undefined {
+  const counts = new Map<string, number>();
+  for (const m of measurements) if (!m.dirty && m.status !== "FAILED") counts.set(m.run.machine.id, (counts.get(m.run.machine.id) ?? 0) + 1);
+  let best: string | undefined;
+  for (const m of measurements) {
+    const id = m.run.machine.id;
+    if (counts.has(id) && (best === undefined || counts.get(id)! >= counts.get(best)!)) best = id;
+  }
+  return best ?? measurements.at(-1)?.run.machine.id;
+}

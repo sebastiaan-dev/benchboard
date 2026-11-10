@@ -1,4 +1,6 @@
 import { useParams, useSearchParams, Link } from "react-router";
+import { Switch } from "@/components/ui/switch";
+import { Label } from "@/components/ui/label";
 import { History, Layers, ListChecks } from "lucide-react";
 import { graphql } from "@/gql";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -9,7 +11,7 @@ import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { Panel, PanelHeader, Stat, StatStrip, Well } from "@/components/kit/panel";
 import { Sparkline } from "@/components/kit/encodings";
 import { useGraphQL } from "@/lib/graphql";
-import { dateTime, duration, relativeTime } from "@/lib/format";
+import { dateTime, duration, primaryMachine, relativeTime } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const BenchmarkQuery = graphql(`
@@ -25,9 +27,9 @@ const BenchmarkQuery = graphql(`
         count
         lastRecordedAt
         measurements(limit: 300) {
-          id label median mean q1 q3 min max n dirty status commitSha recordedAt
+          id label median mean q1 q3 min max n dirty status commitSha recordedAt build
           commit { subject }
-          run { id title machine { hostname } }
+          run { id title machine { id hostname cpu } }
           profiles { id }
         }
       }
@@ -47,13 +49,25 @@ export function BenchmarkPage() {
   if (!benchmark) return <NotFound what="benchmark" />;
   const current = benchmark.cases.find((entry) => entry.caseKey === params.get("case")) ?? benchmark.cases[0];
   const select = (caseKey: string) => setParams({ case: caseKey }, { replace: true });
-  const points = current?.measurements.map((m, index) => ({
+  const set = (key: string, value: string | null) => setParams((previous) => {
+    const next = new URLSearchParams(previous);
+    value === null ? next.delete(key) : next.set(key, value);
+    return next;
+  }, { replace: true });
+  // History is shown per machine cohort: measurements from different machines are never joined into one line.
+  const all = current?.measurements ?? [];
+  const machineList = [...new Map(all.map((m) => [m.run.machine.id, m.run.machine])).values()];
+  const machineId = params.get("machine") ?? primaryMachine(all);
+  const includeDirty = params.get("dirty") === "1";
+  const cohort = all.filter((m) => m.run.machine.id === machineId && m.status !== "FAILED" && (includeDirty || !m.dirty));
+  const builds = new Set(cohort.map((m) => m.build ?? "unrecorded"));
+  const points = cohort.map((m, index) => ({
     position: index, label: `${m.commitSha?.slice(0, 7) ?? "?"}${m.dirty ? "*" : ""}`,
     subject: `${m.commit?.subject ?? ""} — ${dateTime(m.recordedAt)} on ${m.run.machine.hostname}`,
     value: m.median, q1: m.q1, q3: m.q3, min: m.min, max: m.max, n: m.n, dirty: m.dirty ?? false,
-  })) ?? [];
-  const medians = current?.measurements.map((m) => m.median) ?? [];
-  const machines = new Set(current?.measurements.map((m) => m.run.machine.hostname));
+  }));
+  const medians = cohort.map((m) => m.median);
+  const machine = machineList.find((entry) => entry.id === machineId);
 
   return (
     <div className="space-y-5">
@@ -80,7 +94,11 @@ export function BenchmarkPage() {
                 <span className="truncate text-sm font-medium">{entry.caseKey}</span>
                 <span className="text-muted-foreground font-mono text-[11px]">{entry.count}</span>
               </span>
-              <Sparkline values={entry.measurements.slice(-24).map((m) => m.median)} width={150} height={20} color="var(--info)" />
+              <Sparkline width={150} height={20} color="var(--info)" values={(() => {
+                const clean = entry.measurements.filter((m) => !m.dirty && m.status !== "FAILED");
+                const machine = primaryMachine(entry.measurements);
+                return clean.filter((m) => m.run.machine.id === machine).slice(-24).map((m) => m.median);
+              })()} />
               <span className="text-muted-foreground font-mono text-[10.5px]">{relativeTime(entry.lastRecordedAt)}</span>
             </button>
           ))}
@@ -90,29 +108,37 @@ export function BenchmarkPage() {
       {current && <>
         <Panel>
           <StatStrip className="sm:grid-cols-2 xl:grid-cols-4">
-            <Stat label="Latest median" value={duration(medians.at(-1))} detail={current.measurements.at(-1)?.commitSha?.slice(0, 7)} />
-            <Stat label="Best median" value={duration(Math.min(...medians))} />
-            <Stat label="Measurements" value={current.count} detail={`${new Set(current.measurements.map((m) => m.commitSha)).size} commits`} />
-            <Stat label="Machines" value={machines.size} tone={machines.size > 1 ? "warn" : undefined} detail={machines.size > 1 ? "mixed machines are not comparable" : [...machines][0]} />
+            <Stat label="Latest median" value={duration(medians.at(-1))} detail={`${cohort.at(-1)?.commitSha?.slice(0, 7) ?? "—"} · ${machine?.hostname ?? "?"}`} />
+            <Stat label="Best median" value={medians.length ? duration(Math.min(...medians)) : "—"} detail={`on ${machine?.hostname ?? "?"}${includeDirty ? " incl. dirty" : ""}`} />
+            <Stat label="Measurements" value={cohort.length} unit={`/ ${all.length}`} detail={`${new Set(cohort.map((m) => m.commitSha)).size} commits in this cohort`} />
+            <Stat label="Build configurations" value={builds.size} tone={builds.size > 1 ? "warn" : undefined}
+              detail={builds.size > 1 ? "differing builds in this history" : [...builds][0]} />
           </StatStrip>
         </Panel>
         <Panel>
-          <PanelHeader icon={History} title="History" subtitle="Median of every measurement in recording order · labels are commits (* dirty)"
-            actions={benchmark.cases.length > 1 && (
-              <Select value={current.caseKey} onValueChange={select}>
-                <SelectTrigger size="sm" className="min-w-40"><SelectValue /></SelectTrigger>
-                <SelectContent>{benchmark.cases.map((entry) => <SelectItem key={entry.caseKey} value={entry.caseKey}>{entry.caseKey} ({entry.count})</SelectItem>)}</SelectContent>
+          <PanelHeader icon={History} title="History" subtitle="Median per measurement in recording order for one machine · failed runs excluded · labels are commits (* dirty)"
+            actions={<>
+              <div className="flex items-center gap-2">
+                <Switch id="history-dirty" checked={includeDirty} onCheckedChange={(checked) => set("dirty", checked ? "1" : null)} />
+                <Label htmlFor="history-dirty" className="text-muted-foreground text-xs">Dirty builds</Label>
+              </div>
+              <Select value={machineId ?? ""} onValueChange={(value) => set("machine", value)} disabled={machineList.length < 2}>
+                <SelectTrigger size="sm" className="min-w-44"><SelectValue /></SelectTrigger>
+                <SelectContent>{machineList.map((entry) => (
+                  <SelectItem key={entry.id} value={entry.id}>{entry.hostname} · {entry.cpu} ({all.filter((m) => m.run.machine.id === entry.id).length})</SelectItem>
+                ))}</SelectContent>
               </Select>
-            )} />
+            </>} />
           <div className="space-y-4 px-4 pb-4">
             <Well className="px-1 pt-3 pb-1"><TrendChart points={points} reference={null} statistic="Median" /></Well>
             <Well className="divide-y overflow-hidden">
-              {[...current.measurements].reverse().slice(0, 40).map((m) => (
-                <Link key={m.id} to={`/runs/${m.run.id}`} className="hover:bg-accent/50 grid grid-cols-[9rem_5rem_minmax(0,1fr)_6rem_3rem_7rem] items-center gap-3 px-3 py-1.5 text-xs">
+              {[...all].reverse().slice(0, 60).map((m) => (
+                <Link key={m.id} to={`/runs/${m.run.id}`} className={cn("hover:bg-accent/50 grid grid-cols-[9rem_5rem_minmax(0,1fr)_6rem_3rem_7rem] items-center gap-3 px-3 py-1.5 text-xs",
+                  !cohort.includes(m) && "opacity-45")} title={!cohort.includes(m) ? "Not in the plotted cohort (other machine, dirty or failed)" : undefined}>
                   <span className="text-muted-foreground font-mono">{dateTime(m.recordedAt)}</span>
                   <span className="font-mono">{m.commitSha?.slice(0, 7)}{m.dirty ? "*" : ""}</span>
                   <span className="text-muted-foreground truncate">{m.commit?.subject ?? m.run.title}</span>
-                  <span className="text-right font-mono tabular-nums">{duration(m.median)}</span>
+                  <span className="text-right font-mono tabular-nums">{duration(m.median)}{m.status === "FAILED" ? " ✕" : ""}</span>
                   <span className="text-muted-foreground text-right font-mono">{m.n}</span>
                   <span className="text-muted-foreground truncate text-right font-mono">{m.run.machine.hostname}</span>
                 </Link>
