@@ -5,12 +5,14 @@ import { createHash, randomBytes } from "node:crypto";
 import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { openDatabase } from "./db.ts";
 import { parseHyperfineExport, MAX_EXPORT_BYTES, type ExportedCase, type CaseStatus } from "./hyperfine.ts";
-import { parseMetadata, slug, type IngestMetadata, type MachineMetadata } from "./metadata.ts";
+import { parseMetadata, slug, type IngestMetadata, type MachineMetadata, type ProfileMetadata } from "./metadata.ts";
 import {
 	FULL_SHA, commitRange, githubRemotes, mergeBase, repositoryIdentity, resolveCommit, workingTree,
 	type CommitInfo, type RepositoryIdentity,
 } from "./git.ts";
 import { fetchCommit, fetchPullRequest, parsePullRequestReference } from "./github.ts";
+import { MAX_PROFILE_BYTES, decodeProfileBytes, parseProfile, type SymsSidecar } from "./profile.ts";
+import type { CallTree } from "./profile-tree.ts";
 
 export interface Repository {
 	id: number;
@@ -109,6 +111,42 @@ export interface Measurement {
 	machineId: number;
 }
 
+export interface Profile {
+	id: number;
+	measurementId: number;
+	label: string | null;
+	tool: string;
+	sha256: string;
+	symsSha256: string | null;
+	product: string | null;
+	iterations: number;
+	samples: number;
+	intervalMs: number;
+	durationMs: number | null;
+	threads: { name: string; samples: number }[];
+	symbolicatedShare: number;
+	nodeCount: number;
+	command: string | null;
+	recordedAt: string;
+}
+
+export interface AttachProfileInput {
+	measurementId: number;
+	/** samply/Firefox Profiler processed profile, optionally gzip-compressed. */
+	file: string;
+	/** samply `.syms.json` sidecar; defaults to the file next to the profile, if present. */
+	syms?: string | null;
+	iterations?: number;
+	label?: string;
+	command?: string;
+	cwd?: string;
+}
+
+/** samply writes `name.json.gz` next to `name.json.syms.json`. */
+export function sidecarPath(file: string): string {
+	return file.replace(/\.gz$/, "").replace(/(\.json)?$/, ".json.syms.json");
+}
+
 export interface IngestInput {
 	/** Hyperfine export path, resolved against cwd. */
 	file: string;
@@ -157,6 +195,9 @@ const toMeasurement = (row: unknown) => mapRow<Measurement>(row, {
 });
 const toRun = (row: unknown) => mapRow<Run>(row, { checkoutDirty: bool });
 const toCommit = (row: unknown) => mapRow<Commit>(row, { parents: (value: string) => JSON.parse(value) });
+const PROFILE_COLUMNS = `id, measurement_id, label, tool, sha256, syms_sha256, product, iterations, samples, interval_ms, duration_ms,
+	threads, symbolicated_share, node_count, command, recorded_at`;
+const toProfile = (row: unknown) => mapRow<Profile>(row, { threads: (value: string) => JSON.parse(value) });
 
 export function defaultHome(): string {
 	if (process.env.BENCHBOARD_HOME) return path.resolve(process.env.BENCHBOARD_HOME);
@@ -164,11 +205,11 @@ export function defaultHome(): string {
 	return path.join(data, "benchboard");
 }
 
-function readBounded(file: string): Buffer {
+function readBounded(file: string, limit = MAX_EXPORT_BYTES): Buffer {
 	const fd = fs.openSync(file, "r");
 	try {
 		const stat = fs.fstatSync(fd);
-		if (!stat.isFile() || stat.size > MAX_EXPORT_BYTES) throw new Error(`Expected a regular file of at most ${MAX_EXPORT_BYTES / 1024 / 1024} MiB: ${file}`);
+		if (!stat.isFile() || stat.size > limit) throw new Error(`Expected a regular file of at most ${limit / 1024 / 1024} MiB: ${file}`);
 		const bytes = Buffer.alloc(stat.size);
 		let length = 0;
 		while (length < bytes.length) {
@@ -398,8 +439,98 @@ export class Store {
 					exit_codes: entry.exitCodes ? JSON.stringify(entry.exitCodes) : null,
 				});
 			});
-			return { run: this.run(id)!, measurements: this.runMeasurements(id), benchmark, repository, warnings };
+			const measurements = this.runMeasurements(id);
+			cases.forEach((_, index) => {
+				const profiles = meta.cases?.[index]?.profile;
+				for (const profile of profiles === undefined ? [] : Array.isArray(profiles) ? profiles : [profiles]) {
+					const spec: Exclude<ProfileMetadata, string> = typeof profile === "string" ? { file: profile } : profile;
+					this.attachProfile({ ...spec, measurementId: measurements[index].id, cwd: input.cwd });
+				}
+			});
+			return { run: this.run(id)!, measurements, benchmark, repository, warnings };
 		});
+	}
+
+	/** Stores a sampled profile for a measurement: raw files content-addressed, plus an aggregated call tree. */
+	attachProfile(input: AttachProfileInput): Profile {
+		const measurement = this.measurement(input.measurementId);
+		if (!measurement) throw new Error(`Unknown measurement ${input.measurementId}.`);
+		const resolve = (file: string) => path.resolve(input.cwd ?? process.cwd(), file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file);
+		const file = resolve(input.file);
+		const bytes = readBounded(file, MAX_PROFILE_BYTES);
+		const symsFile = input.syms === null ? null : input.syms ? resolve(input.syms) : fs.existsSync(sidecarPath(file)) ? sidecarPath(file) : null;
+		const symsBytes = symsFile ? readBounded(symsFile, MAX_PROFILE_BYTES) : null;
+		let syms: SymsSidecar | null = null;
+		if (symsBytes) {
+			try { syms = JSON.parse(symsBytes.toString("utf8")); } catch (error) { throw new Error(`Invalid symbol sidecar ${symsFile}: ${(error as Error).message}`); }
+		}
+		const parsed = parseProfile(decodeProfileBytes(bytes), syms);
+		const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
+		const sha256 = digest(bytes);
+		const symsSha256 = symsBytes ? digest(symsBytes) : null;
+		const store = (name: string, data: Uint8Array) => {
+			const target = path.join(this.home, "profiles", name);
+			if (fs.existsSync(target)) return;
+			fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
+			fs.writeFileSync(`${target}.${process.pid}.tmp`, data, { mode: 0o600 });
+			fs.renameSync(`${target}.${process.pid}.tmp`, target);
+		};
+		// Raw profiles are kept gzip-compressed; the Firefox Profiler accepts either form.
+		store(`${sha256}.json.gz`, bytes[0] === 0x1f && bytes[1] === 0x8b ? bytes : Bun.gzipSync(new Uint8Array(bytes)));
+		if (symsBytes && symsSha256) store(`${symsSha256}.syms.json`, symsBytes);
+		const id = Number(this.db.query(`INSERT INTO profile (measurement_id, label, tool, sha256, syms_sha256, product, iterations,
+			samples, interval_ms, duration_ms, threads, symbolicated_share, node_count, command, recorded_at, tree)
+			VALUES (:measurement_id, :label, 'samply', :sha256, :syms_sha256, :product, :iterations, :samples, :interval_ms,
+			:duration_ms, :threads, :symbolicated_share, :node_count, :command, :recorded_at, :tree)`).run({
+			measurement_id: measurement.id, label: input.label ?? null, sha256, syms_sha256: symsSha256, product: parsed.product,
+			iterations: input.iterations ?? 1, samples: parsed.tree.samples, interval_ms: parsed.tree.intervalMs,
+			duration_ms: parsed.durationMs, threads: JSON.stringify(parsed.tree.threads), symbolicated_share: parsed.symbolicatedShare,
+			node_count: parsed.tree.nodes.func.length, command: input.command ?? null, recorded_at: new Date().toISOString(),
+			tree: Bun.gzipSync(new TextEncoder().encode(JSON.stringify(parsed.tree))),
+		}).lastInsertRowid);
+		return this.profile(id)!;
+	}
+
+	profile(id: number): Profile | undefined {
+		const row = this.db.query(`SELECT ${PROFILE_COLUMNS} FROM profile WHERE id = ?`).get(id);
+		return row ? toProfile(row) : undefined;
+	}
+	profilesForMeasurement(measurementId: number): Profile[] {
+		return this.db.query(`SELECT ${PROFILE_COLUMNS} FROM profile WHERE measurement_id = ? ORDER BY id`).all(measurementId).map(toProfile);
+	}
+	/** Profiles of the same benchmark case (any commit or run), newest first. */
+	profilesForSeries(benchmarkId: number, caseKey: string, limit = 100): Profile[] {
+		return this.db.query(`SELECT ${PROFILE_COLUMNS.replace(/(^|,\s*)(\w)/g, "$1p.$2")} FROM profile p
+			JOIN measurement m ON m.id = p.measurement_id JOIN run r ON r.id = m.run_id
+			WHERE m.benchmark_id = ? AND m.case_key = ? ORDER BY r.recorded_at DESC, p.id DESC LIMIT ?`)
+			.all(benchmarkId, caseKey, limit).map(toProfile);
+	}
+	profileTree(id: number): CallTree {
+		const row = this.db.query("SELECT tree FROM profile WHERE id = ?").get(id) as { tree: Uint8Array } | null;
+		if (!row) throw new Error(`Unknown profile ${id}.`);
+		return JSON.parse(new TextDecoder().decode(Bun.gunzipSync(row.tree as Uint8Array<ArrayBuffer>)));
+	}
+	profileFile(profile: Profile): string {
+		return path.join(this.home, "profiles", `${profile.sha256}.json.gz`);
+	}
+	profileSymsFile(profile: Profile): string | null {
+		return profile.symsSha256 ? path.join(this.home, "profiles", `${profile.symsSha256}.syms.json`) : null;
+	}
+	deleteProfile(id: number): boolean {
+		return this.db.query("DELETE FROM profile WHERE id = ?").run(id).changes > 0;
+	}
+	/** Resolves `run-id[:position]` (position defaults to the only case). */
+	measurementByReference(reference: string): Measurement {
+		const [runId, position] = reference.split(":");
+		const measurements = this.runMeasurements(runId);
+		if (!measurements.length) throw new Error(`Unknown run ${runId}.`);
+		if (position === undefined) {
+			if (measurements.length > 1) throw new Error(`Run ${runId} has ${measurements.length} cases; use ${runId}:<position>.`);
+			return measurements[0];
+		}
+		const found = measurements.find((measurement) => measurement.position === Number(position));
+		if (!found) throw new Error(`Run ${runId} has no case ${position}.`);
+		return found;
 	}
 
 	/** Synchronizes a GitHub pull request's commits; `reference` is `123`, `owner/name#123` or a URL. */

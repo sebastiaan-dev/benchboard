@@ -29,7 +29,7 @@ async function serveStatic(url: URL): Promise<Response> {
 	return new Response(asset, { headers: { "cache-control": immutable ? "public, max-age=31536000, immutable" : "no-cache" } });
 }
 
-export type Route = (request: Request, url: URL) => Response | Promise<Response> | undefined;
+export type Route = (request: Request, url: URL) => Response | undefined | Promise<Response | undefined>;
 
 export function createServer(store: Store, options: { host: string; port: number; routes?: Route[] }) {
 	const yoga = createYoga<{}, Context>({

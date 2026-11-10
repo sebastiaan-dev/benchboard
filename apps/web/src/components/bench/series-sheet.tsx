@@ -1,4 +1,6 @@
 import { Link } from "react-router";
+import { Flame, GitCompare } from "lucide-react";
+import { Button } from "@/components/ui/button";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -45,6 +47,11 @@ export function SeriesSheet({ series, report, statistic, onClose }: {
   const reference = series?.points.find((point) => point.position === series.reference?.position)?.measurement;
   const latest = series?.points.find((point) => point.position === series.latest?.position)?.measurement;
   const latestDetail = latest ? byId.get(latest.id) : undefined;
+  // Profiles closest to each end of the series, for a one-click differential profile.
+  const profiled = series?.points.filter((point) => point.measurement?.profiles.length) ?? [];
+  const firstProfile = profiled[0]?.measurement?.profiles[0];
+  const lastProfile = profiled.at(-1)?.measurement?.profiles[0];
+  const label = (point: (typeof profiled)[number] | undefined) => point ? (point.isBase ? "base" : `#${point.position}`) : "";
 
   return (
     <Sheet open={series !== null} onOpenChange={(open) => !open && onClose()}>
@@ -81,6 +88,26 @@ export function SeriesSheet({ series, report, statistic, onClose }: {
                 />
               )}
             </section>
+            {profiled.length > 0 && (
+              <section className="flex flex-wrap items-center gap-2 rounded-lg border p-3">
+                <Flame className="size-4 text-orange-500" />
+                <span className="text-sm">{profiled.length} commit{profiled.length === 1 ? "" : "s"} with CPU profiles</span>
+                <div className="ml-auto flex gap-2">
+                  {firstProfile && lastProfile && firstProfile.id !== lastProfile.id && (
+                    <Button size="sm" asChild>
+                      <Link to={`/profiles/compare?base=${firstProfile.id}&head=${lastProfile.id}`}>
+                        <GitCompare /> Compare {label(profiled[0])} → {label(profiled.at(-1))}
+                      </Link>
+                    </Button>
+                  )}
+                  {lastProfile && (
+                    <Button size="sm" variant="outline" asChild>
+                      <Link to={`/profiles/${lastProfile.id}`}><Flame /> Latest flame graph</Link>
+                    </Button>
+                  )}
+                </div>
+              </section>
+            )}
             <section className="space-y-2">
               <h3 className="text-sm font-medium">Measurements</h3>
               <Table>
@@ -93,6 +120,7 @@ export function SeriesSheet({ series, report, statistic, onClose }: {
                     <TableHead className="text-right">vs ref</TableHead>
                     <TableHead className="text-right">vs prev</TableHead>
                     <TableHead>Run</TableHead>
+                    <TableHead className="w-8"><Flame className="size-3.5" /></TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -112,6 +140,14 @@ export function SeriesSheet({ series, report, statistic, onClose }: {
                         <TableCell>
                           {m && <Link className="text-xs underline-offset-4 hover:underline" to={`/runs/${m.run.id}`}>{m.run.title ?? m.run.id}</Link>}
                           {point.candidates.length > 1 && <div className="text-muted-foreground text-xs">+{point.candidates.length - 1} other</div>}
+                        </TableCell>
+                        <TableCell>
+                          {m?.profiles.map((profile) => (
+                            <Link key={profile.id} to={`/profiles/${profile.id}`} title={`${profile.label ?? "Profile"}: ${profile.cpuMs.toFixed(1)} ms CPU`}
+                              className="inline-flex items-center gap-0.5 text-xs text-orange-600 hover:underline dark:text-orange-400">
+                              <Flame className="size-3.5" />
+                            </Link>
+                          ))}
                         </TableCell>
                       </TableRow>
                     );

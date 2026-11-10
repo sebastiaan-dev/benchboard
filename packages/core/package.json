@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./profile-tree": "./src/profile-tree.ts"
   },
   "scripts": {
     "typecheck": "tsc -p ."

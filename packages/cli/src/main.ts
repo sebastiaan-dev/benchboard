@@ -5,11 +5,12 @@ import { parseArgs, stripVTControlCharacters, styleText } from "node:util";
 import { spawn } from "node:child_process";
 import { graphql } from "graphql";
 import {
-	Store, importLegacy, pullRequestReport, type PullRequest, type PullRequestReport, type Measurement, type Comparison,
+	Store, diffFunctions, functionStats, importLegacy, pullRequestReport, type Profile, type PullRequest, type PullRequestReport, type Measurement, type Comparison,
 	type Repository,
 } from "@benchboard/core";
 import { createSchema, typeDefs } from "@benchboard/graphql";
 import { createServer, DEFAULT_PORT } from "./server.ts";
+import { profileRoutes } from "./profile-routes.ts";
 
 const HELP = `benchboard — track Hyperfine benchmarks across commits and pull requests
 
@@ -30,6 +31,13 @@ Usage:
   benchboard pr list [--all]                  Tracked PRs for this repository
   benchboard pr report <ref> [options]        Commit-by-commit comparison against the PR base
       --statistic median|mean   --threshold <percent>   --machine <id>   --include-dirty
+  benchboard profile attach <run>[:<case>] <profile.json.gz> [--syms f] [--iterations n] [--label t]
+                                              Attach a samply profile to a measured case
+  benchboard profile record <run>[:<case>] [--iterations n] [--rate hz] [-- command...]
+                                              Profile the case's command with samply and attach it
+  benchboard profile show <id> [--limit n]    Hottest functions (self and total CPU time)
+  benchboard profile diff <base-id> <head-id> [--limit n]
+                                              Per-function CPU-time change between two profiles
   benchboard runs [--limit n] [--all]         Recent runs
   benchboard query <graphql|@file> [--variables <json>]
                                               Execute a GraphQL document locally; prints JSON
@@ -162,7 +170,7 @@ async function ensureServer(home: string, port: number, explicitHome: string | u
 }
 
 async function serve(store: Store, host: string, port: number, openBrowser: boolean): Promise<number> {
-	const server = createServer(store, { host, port, routes: [] });
+	const server = createServer(store, { host, port, routes: [profileRoutes(store)] });
 	const url = `http://${host.includes(":") ? `[${host}]` : host === "127.0.0.1" ? "localhost" : host}:${port}`;
 	console.error(`benchboard serving ${url} (GraphQL at ${url}/graphql), data in ${store.home}`);
 	if (openBrowser) open(url);
@@ -185,6 +193,7 @@ export async function main(argv: string[]): Promise<number> {
 			all: { type: "boolean" }, statistic: { type: "string" }, threshold: { type: "string" }, machine: { type: "string" },
 			"include-dirty": { type: "boolean" }, limit: { type: "string" }, variables: { type: "string" },
 			port: { type: "string" }, host: { type: "string" }, open: { type: "boolean" },
+			syms: { type: "string" }, iterations: { type: "string" }, label: { type: "string" }, rate: { type: "string" },
 		},
 	});
 	const [command, ...rest] = positionals;
@@ -260,6 +269,78 @@ export async function main(argv: string[]): Promise<number> {
 					return 0;
 				}
 				throw new Error("Usage: benchboard pr <track|sync|list|report> ...");
+			}
+			case "profile": {
+				const [action, ...args] = rest;
+				const iterations = options.iterations === undefined ? undefined : Number(options.iterations);
+				if (iterations !== undefined && (!Number.isSafeInteger(iterations) || iterations < 1)) throw new Error("--iterations must be a positive integer.");
+				const printProfile = (profile: Profile) => {
+					const m = store.measurement(profile.measurementId)!;
+					console.log(`Profile ${profile.id} → run ${m.runId} case ${m.position} [${m.caseKey}] @ ${m.commitSha?.slice(0, 10) ?? "?"}: ` +
+						`${profile.samples} samples, ${(profile.samples * profile.intervalMs / profile.iterations).toFixed(1)} ms CPU/iteration, ` +
+						`${(profile.symbolicatedShare * 100).toFixed(1)}% symbolicated${profile.symsSha256 ? "" : " (no .syms.json sidecar)"}`);
+				};
+				if (action === "attach") {
+					if (args.length !== 2) throw new Error("Usage: benchboard profile attach <run>[:<case>] <profile.json.gz>");
+					const profile = store.attachProfile({
+						measurementId: store.measurementByReference(args[0]).id, file: args[1], syms: options.syms, iterations,
+						label: options.label, cwd,
+					});
+					if (options.json) json(profile); else printProfile(profile);
+					return 0;
+				}
+				if (action === "record") {
+					if (!args.length) throw new Error("Usage: benchboard profile record <run>[:<case>] [-- command...]");
+					const measurement = store.measurementByReference(args[0]);
+					const command = args.length > 1 ? args.slice(1) : ["sh", "-c", measurement.command ?? measurement.exportedCommand];
+					const directory = fs.mkdtempSync(path.join(os.tmpdir(), "benchboard-samply-"));
+					try {
+						const output = path.join(directory, "profile.json.gz");
+						const samply = Bun.spawnSync(["samply", "record", "--save-only", "--no-open", "--unstable-presymbolicate", "-o", output,
+							...(options.rate ? ["--rate", options.rate] : []), ...(iterations ? ["--iteration-count", String(iterations)] : []), ...command],
+						{ cwd, stdout: "inherit", stderr: "inherit" });
+						if (samply.exitCode !== 0) throw new Error(`samply exited with ${samply.exitCode}; is it installed and set up (\`samply setup\` on macOS)?`);
+						const profile = store.attachProfile({
+							measurementId: measurement.id, file: output, iterations, label: options.label, command: command.join(" "), cwd,
+						});
+						if (options.json) json(profile); else printProfile(profile);
+					} finally {
+						fs.rmSync(directory, { recursive: true, force: true });
+					}
+					return 0;
+				}
+				const limit = Number(options.limit ?? 25);
+				const load = (value: string | undefined) => {
+					const profile = value && store.profile(Number(value));
+					if (!profile) throw new Error(`Unknown profile ${value ?? ""}.`);
+					return profile;
+				};
+				const ms = (value: number) => `${value.toFixed(1)} ms`.padStart(11);
+				if (action === "show") {
+					const profile = load(args[0]);
+					const tree = store.profileTree(profile.id);
+					const scale = tree.intervalMs / profile.iterations;
+					const stats = functionStats(tree).sort((a, b) => b.self - a.self).slice(0, limit);
+					if (options.json) { json(stats); return 0; }
+					printProfile(profile);
+					console.log(`${"self".padStart(11)} ${"total".padStart(11)}  function`);
+					for (const stat of stats) console.log(`${ms(stat.self * scale)} ${ms(stat.total * scale)}  ${clean(stat.name).slice(0, 120)}${stat.library ? color("dim", `  ${stat.library}`) : ""}`);
+					return 0;
+				}
+				if (action === "diff") {
+					const [base, head] = [load(args[0]), load(args[1])];
+					const deltas = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), { base: base.iterations, head: head.iterations }).slice(0, limit);
+					if (options.json) { json(deltas); return 0; }
+					const cpu = (p: Profile) => p.samples * p.intervalMs / p.iterations;
+					console.log(`CPU per iteration: ${cpu(base).toFixed(1)} ms → ${cpu(head).toFixed(1)} ms (${percent(cpu(head) / cpu(base))})`);
+					console.log(`${"Δ self".padStart(11)} ${"base".padStart(11)} ${"head".padStart(11)}  function`);
+					for (const d of deltas) {
+						const delta = d.headSelfMs - d.baseSelfMs;
+						console.log(`${color(delta > 0 ? "red" : "green", ms(delta))} ${ms(d.baseSelfMs)} ${ms(d.headSelfMs)}  ${clean(d.name).slice(0, 110)}`);
+					}
+					return 0;
+				}
+				throw new Error("Usage: benchboard profile <attach|record|show|diff> ...");
 			}
 			case "runs": {
 				const runs = store.runs({

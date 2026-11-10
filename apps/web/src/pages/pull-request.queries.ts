@@ -33,6 +33,7 @@ export const PointMeasurementFields = graphql(`
     cv
     recordedAt
     run { id title }
+    profiles { id cpuMs label }
   }
 `);
 

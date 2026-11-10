@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link, useParams } from "react-router";
 import { ErrorBar } from "recharts";
+import { Flame } from "lucide-react";
 import { graphql } from "@/gql";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -44,6 +45,7 @@ const RunQuery = graphql(`
         benchmark { id key title }
         commit { shortSha subject url pullRequests { id title number } }
         parameters { name value }
+        profiles { id label cpuMs symbolicatedShare }
       }
     }
   }
@@ -184,6 +186,7 @@ export function RunPage() {
                 <TableHead className="text-right">Min … Max</TableHead>
                 <TableHead className="text-right">n</TableHead>
                 <TableHead className="text-right">RSS</TableHead>
+                <TableHead>Profile</TableHead>
                 <TableHead className="text-right">Change</TableHead>
               </TableRow>
             </TableHeader>
@@ -212,6 +215,13 @@ export function RunPage() {
                     <TableCell className="text-muted-foreground text-right font-mono text-xs tabular-nums">{duration(m.min)} … {duration(m.max)}</TableCell>
                     <TableCell className="text-right tabular-nums">{m.n}</TableCell>
                     <TableCell className="text-muted-foreground text-right text-xs">{bytes(m.rssPeak)}</TableCell>
+                    <TableCell>
+                      {m.profiles.map((profile) => (
+                        <Link key={profile.id} to={`/profiles/${profile.id}`} className="inline-flex items-center gap-1 text-xs text-orange-600 hover:underline dark:text-orange-400">
+                          <Flame className="size-3.5" /> {profile.label ?? `${profile.cpuMs.toFixed(0)} ms`}
+                        </Link>
+                      ))}
+                    </TableCell>
                     <TableCell className="text-right">
                       <button type="button" onClick={() => setBaseline(m.id)} className={cn("rounded px-1.5 py-0.5 text-xs hover:bg-muted", isBaseline && "bg-muted font-medium")}>
                         {isBaseline && !pair ? "baseline" : comparison ? (

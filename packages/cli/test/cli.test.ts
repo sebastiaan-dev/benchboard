@@ -12,6 +12,8 @@ const cleanups: (() => void)[] = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
 const t = { after: (fn: () => void) => { cleanups.push(fn); } };
 
+import { syntheticProfile } from "../../core/test/synthetic-profile.ts";
+
 const bin = fileURLToPath(new URL("../bin/benchboard.ts", import.meta.url));
 
 function setup(t: { after: (fn: () => void) => void }) {
@@ -107,4 +109,38 @@ test("CLI: serve exposes GraphQL on localhost only", async () => {
 			.on("error", reject).end();
 	});
 	assert.equal(status, 421);
+});
+
+test("CLI: attach samply profiles and compare them", () => {
+	const { root, cli } = setup(t);
+	const write = (name: string, compare: number) => {
+		const { profile, syms } = syntheticProfile("engine", [{ name: "worker", stacks: [
+			{ frames: ["main", "Probe", "CompareKeys"], samples: compare }, { frames: ["main", "Build"], samples: 10 },
+		] }]);
+		fs.writeFileSync(path.join(root, `${name}.json.gz`), Bun.gzipSync(new TextEncoder().encode(JSON.stringify(profile))));
+		fs.writeFileSync(path.join(root, `${name}.json.syms.json`), JSON.stringify(syms));
+	};
+	write("base", 50);
+	write("head", 10);
+	const exportFile = path.join(root, "bench.json");
+	fs.writeFileSync(exportFile, JSON.stringify({ results: [
+		{ command: "./old", times: series(1), exit_codes: series(1).map(() => 0) },
+		{ command: "./new", times: series(0.5), exit_codes: series(1).map(() => 0) },
+	] }));
+	const meta = path.join(root, "meta.json");
+	fs.writeFileSync(meta, JSON.stringify({ benchmark: "join/probe", cases: [
+		{ case: "probe", commit: "main", profile: path.join(root, "base.json.gz") }, { case: "probe", commit: "HEAD" },
+	] }));
+	const run = JSON.parse(cli("ingest", exportFile, "--meta", meta, "--json").stdout).run.id;
+	const attached = cli("profile", "attach", `${run}:2`, path.join(root, "head.json.gz"), "--iterations", "2", "--json");
+	assert.equal(attached.code, 0, attached.stderr);
+	assert.equal(JSON.parse(attached.stdout).iterations, 2);
+	assert.match(cli("profile", "attach", run, path.join(root, "head.json.gz")).stderr, /has 2 cases/);
+	const show = JSON.parse(cli("profile", "show", "1", "--json").stdout);
+	assert.deepEqual(show[0], { name: "CompareKeys", library: "engine", self: 50, total: 50 });
+	const diff = cli("profile", "diff", "1", "2");
+	assert.match(diff.stdout, /CPU per iteration: 60\.0 ms → 10\.0 ms/);
+	assert.match(diff.stdout, /-45\.0 ms .*CompareKeys/);
+	const query = JSON.parse(cli("query", "{ profileDiff(base: 1, head: 2, limit: 1) { headCpuMs functions { name deltaSelfMs } } }").stdout);
+	assert.deepEqual(query.data.profileDiff, { headCpuMs: 10, functions: [{ name: "CompareKeys", deltaSelfMs: -45 }] });
 });

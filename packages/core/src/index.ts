@@ -6,3 +6,5 @@ export * from "./github.ts";
 export * from "./store.ts";
 export * from "./report.ts";
 export * from "./legacy.ts";
+export * from "./profile.ts";
+export * from "./profile-tree.ts";

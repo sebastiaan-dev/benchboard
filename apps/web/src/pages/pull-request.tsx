@@ -74,6 +74,7 @@ export function PullRequestPage() {
         vsReference: point.vsReference,
         vsPrevious: point.vsPrevious,
         extra: Math.max(0, point.candidates.length - 1),
+        profiled: (point.measurement?.profiles.length ?? 0) > 0,
       })),
     }));
     const impact: ImpactDatum[] = report.series.flatMap((series) => series.latestComparison ? [{
@@ -237,7 +238,7 @@ export function PullRequestPage() {
           <CardHeader>
             <CardTitle>Commit matrix</CardTitle>
             <CardDescription>
-              Each cell compares a commit with the series reference (outlined). Arrows mark confident step changes from the previous measured commit; dashed cells are dirty builds.
+              Each cell compares a commit with the series reference (outlined). Arrows mark confident step changes from the previous measured commit; dashed cells are dirty builds; flames mark CPU profiles.
             </CardDescription>
             <CardAction className="text-muted-foreground text-xs">Click a row for samples and provenance</CardAction>
           </CardHeader>

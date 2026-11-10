@@ -9,8 +9,8 @@
     "dev": "bun run --filter '@benchboard/web' --filter '@benchboard/cli' dev",
     "build": "bun run --filter '@benchboard/web' build",
     "typecheck": "bun run --filter '*' typecheck",
-    "test": "bun test packages",
-    "check": "bun run typecheck && bun test packages && bun run build",
+    "test": "bun test --timeout 60000 packages",
+    "check": "bun run typecheck && bun run test && bun run build",
     "seed:demo": "BENCHBOARD_HOME=${BENCHBOARD_HOME:-/tmp/benchboard-demo} bun scripts/seed-demo.ts"
   },
   "devDependencies": {

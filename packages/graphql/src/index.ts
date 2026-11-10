@@ -1,8 +1,8 @@
 import { readFileSync } from "node:fs";
 import { makeExecutableSchema } from "@graphql-tools/schema";
-import type { GraphQLSchema } from "graphql";
+import { GraphQLScalarType, Kind, type GraphQLSchema, type ValueNode } from "graphql";
 import {
-	compare, pullRequestReport, type Commit, type Comparison, type Measurement, type PullRequest, type PullRequestReport,
+	compare, diffFunctions, functionStats, pullRequestReport, type Profile, type Commit, type Comparison, type Measurement, type PullRequest, type PullRequestReport,
 	type ReportPoint, type Repository, type Run, type SeriesReport, type Store,
 } from "@benchboard/core";
 
@@ -37,7 +37,24 @@ interface PointParent extends ReportPoint {
 	repositoryId: number;
 }
 
+function literal(node: ValueNode): unknown {
+	switch (node.kind) {
+		case Kind.STRING: case Kind.BOOLEAN: return node.value;
+		case Kind.INT: case Kind.FLOAT: return Number(node.value);
+		case Kind.LIST: return node.values.map(literal);
+		case Kind.OBJECT: return Object.fromEntries(node.fields.map((field) => [field.name.value, literal(field.value)]));
+		default: return null;
+	}
+}
+
+const JSONScalar = new GraphQLScalarType({
+	name: "JSON", serialize: (value) => value, parseValue: (value) => value, parseLiteral: literal,
+});
+
+const cpuMs = (profile: Profile) => profile.samples * profile.intervalMs / profile.iterations;
+
 export const resolvers = {
+	JSON: JSONScalar,
 	Query: {
 		repositories: (_: unknown, __: Args, { store }: Context) => store.repositories(),
 		repository: (_: unknown, args: Args, { store }: Context) =>
@@ -52,12 +69,51 @@ export const resolvers = {
 		benchmark: (_: unknown, args: Args, { store }: Context) => store.benchmark(id(args.id)),
 		machine: (_: unknown, args: Args, { store }: Context) => store.machine(id(args.id)),
 		runs: (_: unknown, args: Args, { store }: Context) => store.runs({ limit: args.limit, offset: args.offset }),
+		profile: (_: unknown, args: Args, { store }: Context) => store.profile(id(args.id)),
+		profileDiff: (_: unknown, args: Args, { store }: Context) => {
+			const base = store.profile(id(args.base));
+			const head = store.profile(id(args.head));
+			if (!base || !head) throw new Error("Unknown profile.");
+			const functions = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), { base: base.iterations, head: head.iterations })
+				.slice(0, Math.min(args.limit ?? 200, 5000))
+				.map((entry) => ({ ...entry, deltaSelfMs: entry.headSelfMs - entry.baseSelfMs, deltaTotalMs: entry.headTotalMs - entry.baseTotalMs }));
+			return { base, head, baseCpuMs: cpuMs(base), headCpuMs: cpuMs(head), functions };
+		},
 	},
 	Mutation: {
 		syncPullRequest: (_: unknown, args: Args, { store }: Context) => store.resyncPullRequest(id(args.id)),
 		trackGithubPullRequest: (_: unknown, args: Args, { store }: Context) =>
 			store.syncGithubPullRequest({ repositoryId: id(args.repository), reference: args.reference }),
 		deleteRun: (_: unknown, args: Args, { store }: Context) => store.deleteRun(String(args.id)),
+		deleteProfile: (_: unknown, args: Args, { store }: Context) => store.deleteProfile(id(args.id)),
+	},
+	ProfileSort: { SELF: "self", TOTAL: "total" },
+	Profile: {
+		measurement: (profile: Profile, _: Args, { store }: Context) => store.measurement(profile.measurementId),
+		cpuMs,
+		hasSymbols: (profile: Profile) => profile.symsSha256 !== null,
+		rawPath: (profile: Profile) => `/profiles/${profile.id}/profile.json.gz`,
+		firefoxProfilerUrl: (profile: Profile, args: Args) => {
+			const origin = String(args.origin).replace(/\/+$/, "");
+			if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) throw new Error("origin must be a local http(s) URL.");
+			const raw = encodeURIComponent(`${origin}/profiles/${profile.id}/profile.json.gz`);
+			const symbols = encodeURIComponent(`${origin}/profiles/${profile.id}/symbols`);
+			return `https://profiler.firefox.com/from-url/${raw}/calltree/?symbolServer=${symbols}`;
+		},
+		tree: (profile: Profile, _: Args, { store }: Context) => store.profileTree(profile.id),
+		related: (profile: Profile, _: Args, { store }: Context) => {
+			const measurement = store.measurement(profile.measurementId)!;
+			return store.profilesForSeries(measurement.benchmarkId, measurement.caseKey).filter((entry) => entry.id !== profile.id);
+		},
+		topFunctions: (profile: Profile, args: Args, { store }: Context) => {
+			const tree = store.profileTree(profile.id);
+			const scale = tree.intervalMs / profile.iterations;
+			const key = args.by === "total" ? "total" : "self";
+			return functionStats(tree).sort((a, b) => b[key] - a[key]).slice(0, Math.min(args.limit ?? 50, 1000)).map((stat) => ({
+				name: stat.name, library: stat.library, selfMs: stat.self * scale, totalMs: stat.total * scale,
+				selfShare: stat.self / tree.samples, totalShare: stat.total / tree.samples,
+			}));
+		},
 	},
 	Repository: {
 		pullRequests: (repository: Repository, _: Args, { store }: Context) => store.pullRequests(repository.id),
@@ -167,6 +223,7 @@ export const resolvers = {
 			Object.entries(measurement.parameters).map(([name, value]) => ({ name, value })),
 		times: (measurement: Measurement, _: Args, { store }: Context) => store.times(measurement.id),
 		exitCodes: (measurement: Measurement, _: Args, { store }: Context) => store.exitCodes(measurement.id),
+		profiles: (measurement: Measurement, _: Args, { store }: Context) => store.profilesForMeasurement(measurement.id),
 		compare: (measurement: Measurement, args: Args, { store }: Context) => {
 			const baseline = store.measurement(id(args.baseline));
 			if (!baseline) throw new Error(`Unknown measurement ${args.baseline}.`);

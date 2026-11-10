@@ -128,6 +128,28 @@ const MIGRATIONS: string[] = [
 	CREATE INDEX measurement_series ON measurement (benchmark_id, case_key, commit_sha);
 	CREATE INDEX measurement_commit ON measurement (commit_sha);
 	`,
+	`
+	CREATE TABLE profile (
+		id INTEGER PRIMARY KEY,
+		measurement_id INTEGER NOT NULL REFERENCES measurement(id) ON DELETE CASCADE,
+		label TEXT,
+		tool TEXT NOT NULL DEFAULT 'samply',
+		sha256 TEXT NOT NULL,
+		syms_sha256 TEXT,
+		product TEXT,
+		iterations INTEGER NOT NULL DEFAULT 1 CHECK (iterations > 0),
+		samples INTEGER NOT NULL,
+		interval_ms REAL NOT NULL,
+		duration_ms REAL,
+		threads TEXT NOT NULL,
+		symbolicated_share REAL NOT NULL,
+		node_count INTEGER NOT NULL,
+		command TEXT,
+		recorded_at TEXT NOT NULL,
+		tree BLOB NOT NULL
+	);
+	CREATE INDEX profile_measurement ON profile (measurement_id);
+	`,
 ];
 
 export function openDatabase(file: string): Database {

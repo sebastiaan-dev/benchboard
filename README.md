@@ -1,8 +1,9 @@
 # Benchboard
 
 Track [Hyperfine](https://github.com/sharkdp/hyperfine) benchmarks across commits and pull requests,
-query them with GraphQL, and inspect them in a web dashboard built with Vite, shadcn/ui and
-[EvilCharts](https://evilcharts.com).
+attach [samply](https://github.com/mstange/samply) CPU profiles to explain them, query everything
+with GraphQL, and inspect it in a web dashboard built with Vite, shadcn/ui and
+[EvilCharts](https://evilcharts.com). Runs on [Bun](https://bun.sh).
 
 ```
 hyperfine --export-json ─▶ benchboard ingest ─▶ SQLite + raw exports ─▶ GraphQL ─┬─▶ web app (PR reports)
@@ -14,26 +15,26 @@ hyperfine --export-json ─▶ benchboard ingest ─▶ SQLite + raw exports ─
 
 | Path | Purpose |
 | --- | --- |
-| `packages/core` | Hyperfine validation, statistics, git/GitHub resolution, SQLite store, PR reports, pi import |
+| `packages/core` | Hyperfine validation, statistics, git/GitHub resolution, SQLite store (`bun:sqlite`), PR reports, samply profile aggregation, pi import |
 | `packages/graphql` | `schema.graphql` (the API contract) and resolvers |
-| `packages/cli` | `benchboard` CLI and the HTTP server (GraphQL + built web app) |
+| `packages/cli` | `benchboard` CLI and the `Bun.serve` server (GraphQL, web app, Firefox Profiler endpoints) |
 | `apps/web` | React app: shadcn/ui components, EvilCharts visualisations, GraphQL Codegen typed queries |
 
-Node 26 runs the TypeScript sources directly; only the web app has a build step.
+Bun runs the TypeScript sources directly; only the web app has a build step.
 
 ## Quick start
 
 ```sh
-pnpm install   # Node 26+, pnpm 12 (see package.json engines/packageManager)
-pnpm build                                  # web app → apps/web/dist
-pnpm seed:demo                              # synthetic PR in /tmp/benchboard-demo
-BENCHBOARD_HOME=/tmp/benchboard-demo pnpm benchboard serve --open
+bun install
+bun run build                               # web app → apps/web/dist
+bun run seed:demo                           # synthetic PR with profiles in /tmp/benchboard-demo
+BENCHBOARD_HOME=/tmp/benchboard-demo bun benchboard serve --open
 ```
 
-For development, `pnpm dev` runs the API server (port 4319, restarts on change) and Vite (port 5319,
-proxying `/graphql`). Set `BENCHBOARD_HOME` to point both at a data directory.
+For development, `bun run dev` runs the API server (port 4319, restarts on change) and Vite (port 5319,
+proxying `/graphql` and profile endpoints). Set `BENCHBOARD_HOME` to point both at a data directory.
 
-To put the CLI on `PATH`: `ln -s "$PWD/packages/cli/bin/benchboard.ts" ~/.local/bin/benchboard`.
+To put the CLI on `PATH`: `ln -s "$PWD/packages/cli/bin/benchboard.ts" ~/.local/bin/benchboard` (it runs with `bun`).
 
 ## Tracking a pull request
 
@@ -85,6 +86,39 @@ change across commits, a commit × series matrix that highlights the commit intr
 change, and per-series drill-downs with raw samples and provenance. Settings live in the URL, so
 links are shareable.
 
+## CPU profiles (samply)
+
+Timings say *whether* a commit is slower; profiles say *where*. Record the measured command with
+samply and attach the result to its case:
+
+```sh
+samply record --save-only --unstable-presymbolicate -o q1.json.gz ./build/release/duckdb -c "..."
+benchboard profile attach <run-id>:2 q1.json.gz      # picks up q1.json.syms.json automatically
+benchboard profile record <run-id>:2 [--iterations 5] [-- command...]   # or let benchboard run samply
+```
+
+or list them in the ingest metadata: `"cases": [{ "case": "q1", "commit": "HEAD", "profile": "q1.json.gz" }]`
+(also `{ "file", "syms", "iterations", "label" }`, or an array).
+
+Profiles are stored content-addressed under `$BENCHBOARD_HOME/profiles/`, and aggregated at ingest into
+a call tree: samply's `.syms.json` sidecar symbolicates addresses (inlined frames expanded), threads
+keep their own subtrees, and very large trees are pruned to their heaviest 250k nodes (samples are
+folded into parents, so totals stay exact).
+
+In the web app:
+
+* **Profile page** — flame graph (zoom, search, per-thread or merged), hottest functions by self and
+  total time, and *Open in Firefox Profiler*: profiler.firefox.com loads the raw profile from this
+  server and symbolicates through its `/symbolicate/v5` endpoint, as with `samply load`
+  (Chrome may ask to allow local network access).
+* **Comparison** (`/profiles/compare?base=…&head=…`) — a differential flame graph merged by call path
+  (red: more CPU time in head, blue: less) and per-function self/total changes in CPU ms per iteration.
+* The PR matrix marks cells with profiles; a series' panel links straight to the reference → latest
+  comparison.
+
+In the terminal: `benchboard profile show <id>` and `benchboard profile diff <base> <head>`.
+CPU time is samples × interval ÷ iterations, summed over threads, so it can exceed wall time.
+
 ## Statistics
 
 * Statistics are recomputed from Hyperfine's raw samples; exports whose summaries disagree are rejected.
@@ -132,5 +166,5 @@ inferring commits from recorded revision notes.
 ## Checks
 
 ```sh
-pnpm check     # typecheck all packages, node:test suites, web build
+bun run check  # typecheck all packages, bun test suites, web build
 ```

@@ -10,6 +10,8 @@ const HomePage = lazy(() => import("@/pages/home").then((m) => ({ default: m.Hom
 const RepositoryPage = lazy(() => import("@/pages/repository").then((m) => ({ default: m.RepositoryPage })));
 const PullRequestPage = lazy(() => import("@/pages/pull-request").then((m) => ({ default: m.PullRequestPage })));
 const RunPage = lazy(() => import("@/pages/run").then((m) => ({ default: m.RunPage })));
+const ProfilePage = lazy(() => import("@/pages/profile").then((m) => ({ default: m.ProfilePage })));
+const ProfileComparePage = lazy(() => import("@/pages/profile-compare").then((m) => ({ default: m.ProfileComparePage })));
 const BenchmarkPage = lazy(() => import("@/pages/benchmark").then((m) => ({ default: m.BenchmarkPage })));
 
 function ThemeToggle() {
@@ -51,6 +53,8 @@ export function App() {
           <Route path="/pr/:id" element={<PullRequestPage />} />
           <Route path="/runs/:id" element={<RunPage />} />
           <Route path="/benchmarks/:id" element={<BenchmarkPage />} />
+          <Route path="/profiles/compare" element={<ProfileComparePage />} />
+          <Route path="/profiles/:id" element={<ProfilePage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
         </Suspense>

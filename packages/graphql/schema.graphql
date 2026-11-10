@@ -12,6 +12,9 @@ type Query {
   measurements(ids: [ID!]!): [Measurement!]!
   benchmark(id: ID!): Benchmark
   machine(id: ID!): Machine
+  profile(id: ID!): Profile
+  "Per-function CPU-time change between two profiles (e.g. reference and head of a series)."
+  profileDiff(base: ID!, head: ID!, limit: Int = 200): ProfileDiff!
   "Runs across all repositories, newest first."
   runs(limit: Int = 50, offset: Int = 0): [Run!]!
 }
@@ -22,6 +25,7 @@ type Mutation {
   "Starts tracking a GitHub pull request: `123`, `owner/name#123` or a URL."
   trackGithubPullRequest(repository: ID!, reference: String!): PullRequest!
   deleteRun(id: ID!): Boolean!
+  deleteProfile(id: ID!): Boolean!
 }
 
 type Repository {
@@ -263,6 +267,8 @@ type Measurement {
   recordedAt: String!
   times: [Float!]!
   exitCodes: [Int!]
+  "Sampled profiles (samply) recorded for this case's workload."
+  profiles: [Profile!]!
   "Bootstrap comparison of this measurement against another (e.g. the run's baseline case)."
   compare(baseline: ID!, statistic: Statistic = MEDIAN, threshold: Float = 0.02): Comparison
 }
@@ -271,3 +277,79 @@ type Parameter {
   name: String!
   value: String!
 }
+
+"A sampled CPU profile (samply / Firefox Profiler processed format) attached to a measurement."
+type Profile {
+  id: ID!
+  measurement: Measurement!
+  label: String
+  tool: String!
+  product: String
+  "Workload repetitions in the profile; per-iteration times divide by this."
+  iterations: Int!
+  samples: Int!
+  intervalMs: Float!
+  durationMs: Float
+  "Sampled CPU time per iteration: samples × interval / iterations."
+  cpuMs: Float!
+  threads: [ProfileThread!]!
+  "Share of sampled frames that resolved to symbols (needs samply --unstable-presymbolicate)."
+  symbolicatedShare: Float!
+  nodeCount: Int!
+  command: String
+  recordedAt: String!
+  sha256: String!
+  hasSymbols: Boolean!
+  "Raw profile download (gzip JSON)."
+  rawPath: String!
+  "Opens the raw profile in the Firefox Profiler, symbolicated by this server."
+  firefoxProfilerUrl(origin: String!): String!
+  "Aggregated call tree (see @benchboard/core CallTree)."
+  tree: JSON!
+  topFunctions(limit: Int = 50, by: ProfileSort = SELF): [ProfileFunction!]!
+  "Other profiles of the same benchmark case (other commits or runs), newest first."
+  related: [Profile!]!
+}
+
+enum ProfileSort {
+  SELF
+  TOTAL
+}
+
+type ProfileThread {
+  name: String!
+  samples: Int!
+}
+
+type ProfileFunction {
+  name: String!
+  library: String
+  selfMs: Float!
+  totalMs: Float!
+  selfShare: Float!
+  totalShare: Float!
+}
+
+type ProfileDiff {
+  base: Profile!
+  head: Profile!
+  baseCpuMs: Float!
+  headCpuMs: Float!
+  functions: [ProfileFunctionDelta!]!
+}
+
+type ProfileFunctionDelta {
+  name: String!
+  library: String
+  baseSelfMs: Float!
+  headSelfMs: Float!
+  deltaSelfMs: Float!
+  baseTotalMs: Float!
+  headTotalMs: Float!
+  deltaTotalMs: Float!
+  baseSelfShare: Float!
+  headSelfShare: Float!
+}
+
+"Arbitrary JSON (used for compact call trees)."
+scalar JSON

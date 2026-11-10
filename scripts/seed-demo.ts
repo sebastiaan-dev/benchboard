@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { Store, defaultHome, random } from "@benchboard/core";
+import { syntheticProfile, type SyntheticStack } from "../packages/core/test/synthetic-profile.ts";
 
 const home = defaultHome();
 const repo = path.join(home, "demo-repo");
@@ -127,6 +128,40 @@ ingest("micro/hash-join", "Hash join WIP", [{ key: "probe", position: commits.le
 const linux = { hostname: "ci-x86", os: "linux 6.11", arch: "x64", cpu: "AMD EPYC 9454P", ram: 274877906944 };
 for (const position of [0, 2, 7]) {
 	ingest("tpch/sf1", "TPC-H SF1 (CI)", tpch.map((key) => ({ key, position })), { recordedAt: recorded + position * 1000, machine: linux, n: 10, noise: 0.05, drift: 1.35 });
+}
+
+// CPU profiles (samply format with a .syms.json sidecar) for the probe microbenchmark at every commit,
+// telling the story behind the timings: SIMD key comparison, prefetching, then a phase split.
+const probeStacks = (position: number): SyntheticStack[] => {
+	const jitter = () => 1 + (next() - 0.5) * 0.08;
+	const root = ["main", "duckdb::Executor::Run", "duckdb::PipelineTask::Execute"];
+	const probe = position >= 5 ? ["duckdb::PhysicalHashJoin::Probe|duckdb::JoinHashTable::MatchPhase"] : ["duckdb::PhysicalHashJoin::Probe|duckdb::JoinHashTable::ProbeChunk"];
+	const gather = position >= 5 ? ["duckdb::PhysicalHashJoin::Probe|duckdb::JoinHashTable::GatherPhase"] : probe;
+	const compare = position >= 2 ? "duckdb::CompareKeysSIMD<uint64_t>" : "duckdb::CompareKeys<uint64_t>";
+	const weights: [string[], number][] = [
+		[[...root, ...probe, "duckdb::JoinHashTable::Lookup", compare], position >= 2 ? 13 : position >= 1 ? 40 : 45],
+		[[...root, ...probe, "duckdb::JoinHashTable::Lookup"], position >= 3 ? 6 : 14],
+		[[...root, ...probe, "duckdb::JoinHashTable::Lookup", "duckdb::JoinHashTable::PrefetchBuckets"], position >= 3 ? 3 : 0],
+		[[...root, ...probe, "duckdb::VectorOperations::Hash"], position >= 3 ? 12 : 15],
+		[[...root, ...probe, "duckdb::SelectionVector::Slice"], position >= 1 ? 2 : 0],
+		[[...root, ...gather, "duckdb::GatherResult", "_platform_memmove"], position >= 7 ? 12 : 15],
+		[[...root, ...gather, "duckdb::GatherResult"], position >= 5 ? 4 : 3],
+		[[...root, "duckdb::DataChunk::Reset"], position >= 7 ? 3 : 5],
+	];
+	return weights.filter(([, weight]) => weight > 0).map(([frames, weight]) => ({ frames, samples: Math.round(weight * 3 * jitter()) }));
+};
+const profiles = path.join(home, "demo-profiles");
+fs.mkdirSync(profiles, { recursive: true });
+const probeMeasurements = store.db.query(`SELECT m.id, m.commit_sha AS sha FROM measurement m JOIN benchmark b ON b.id = m.benchmark_id
+	WHERE b.key = 'micro/hash-join' AND m.case_key = 'probe' AND m.dirty = 0`).all() as { id: number; sha: string }[];
+for (const measurement of probeMeasurements) {
+	const position = commits.indexOf(measurement.sha);
+	const workers = Array.from({ length: 4 }, () => ({ name: "duckdb-worker", stacks: probeStacks(position) }));
+	const { profile, syms } = syntheticProfile("engine", [{ name: "main", stacks: [{ frames: ["main", "duckdb::Executor::Run"], samples: 6 }] }, ...workers], "engine");
+	const file = path.join(profiles, `probe-${position}.json.gz`);
+	fs.writeFileSync(file, Bun.gzipSync(new TextEncoder().encode(JSON.stringify(profile))));
+	fs.writeFileSync(file.replace(/\.gz$/, "").replace(/\.json$/, ".json.syms.json"), JSON.stringify(syms));
+	store.attachProfile({ measurementId: measurement.id, file, iterations: 10, label: "samply" });
 }
 
 const pr = store.syncLocalBranch({ cwd: repo, base: "main", title: "Vectorized hash join probe" });

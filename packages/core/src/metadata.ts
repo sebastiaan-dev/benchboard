@@ -4,6 +4,19 @@ const text = z.string().max(16_384);
 const key = z.string().min(1).max(200).regex(/^[a-z0-9][a-z0-9._/-]*$/, "Use lowercase letters, digits, '.', '_', '-' and '/'.");
 const revision = z.string().min(1).max(256);
 
+export const ProfileMetadata = z.union([
+	z.string().min(1).max(4096),
+	z.object({
+		/** samply profile (`profile.json.gz`); its `.syms.json` sidecar is found automatically. */
+		file: z.string().min(1).max(4096),
+		syms: z.string().min(1).max(4096).optional(),
+		/** Workload repetitions captured in the profile (`samply record --iteration-count`). */
+		iterations: z.number().int().positive().optional(),
+		label: z.string().max(200).optional(),
+		command: z.string().max(16_384).optional(),
+	}).strict(),
+]);
+
 export const CaseMetadata = z.object({
 	/** Series key within the benchmark; the same key at different commits forms one line. */
 	case: key.optional(),
@@ -16,6 +29,8 @@ export const CaseMetadata = z.object({
 	revision: text.optional(),
 	build: text.optional(),
 	notes: text.optional(),
+	/** Sampled profile(s) of this case's workload, e.g. from `samply record --save-only --unstable-presymbolicate`. */
+	profile: z.union([ProfileMetadata, z.array(ProfileMetadata).max(16)]).optional(),
 }).strict();
 
 export const MachineMetadata = z.object({
@@ -51,6 +66,7 @@ export const IngestMetadata = z.object({
 export type CaseMetadata = z.infer<typeof CaseMetadata>;
 export type IngestMetadata = z.infer<typeof IngestMetadata>;
 export type MachineMetadata = z.infer<typeof MachineMetadata>;
+export type ProfileMetadata = z.infer<typeof ProfileMetadata>;
 
 export function parseMetadata(value: unknown): IngestMetadata {
 	const result = IngestMetadata.safeParse(value ?? {});

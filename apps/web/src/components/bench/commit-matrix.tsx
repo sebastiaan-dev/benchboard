@@ -1,4 +1,4 @@
-import { ArrowDown, ArrowUp } from "lucide-react";
+import { ArrowDown, ArrowUp, Flame } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { changeBackground, duration, percentFromRatio, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -19,6 +19,7 @@ export interface MatrixCell {
   vsReference: MatrixComparison | null;
   vsPrevious: MatrixComparison | null;
   extra: number;
+  profiled: boolean;
 }
 
 export interface MatrixRow {
@@ -135,6 +136,7 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
                           style={cell.vsReference ? { background: changeBackground(cell.vsReference.ratio, cell.vsReference.verdict) } : undefined}
                         >
                           {content}
+                          {cell.profiled && <Flame className="absolute bottom-0.5 left-0.5 size-3 text-orange-500/80" />}
                           {stepMarked(step) && (
                             <span className={cn("absolute top-0.5 right-0.5", step === "REGRESSION" ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
                               {step === "REGRESSION" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />}
@@ -149,6 +151,7 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
                           {cell.isReference && <div className="opacity-70">Reference for this series</div>}
                           {cell.vsReference && <ComparisonLine title="vs reference" comparison={cell.vsReference} />}
                           {cell.vsPrevious && <ComparisonLine title="vs previous" comparison={cell.vsPrevious} />}
+                          {cell.profiled && <div className="opacity-70">CPU profile attached</div>}
                           {cell.extra > 0 && <div className="opacity-70">{cell.extra} more measurement{cell.extra > 1 ? "s" : ""} at this commit</div>}
                         </>}
                       </TooltipContent>
