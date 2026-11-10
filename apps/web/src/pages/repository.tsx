@@ -135,20 +135,22 @@ function geomean(pr: PullRequest) {
   return ratios.length ? Math.exp(ratios.reduce((sum, ratio) => sum + Math.log(ratio), 0) / ratios.length) : null;
 }
 
+const PR_GRID = "grid-cols-[minmax(10rem,1fr)_5.5rem] @md:grid-cols-[minmax(10rem,1fr)_5.5rem_5.5rem] @lg:grid-cols-[minmax(10rem,1fr)_10rem_5.5rem_5.5rem]";
+
 function PullRequestRows({ pullRequests }: { pullRequests: PullRequest[] }) {
   if (!pullRequests.length) {
     return <EmptyState title="No tracked pull requests">Run <code>benchboard pr track 123</code> or <code>benchboard pr track --branch</code> in a checkout.</EmptyState>;
   }
   return (
-    <div className="px-2 pb-2">
-      <div className="text-muted-foreground grid grid-cols-[minmax(0,1fr)_10rem_5.5rem_5.5rem] gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase">
-        <span>Pull request</span><span>Verdicts</span><span className="text-right">Geomean</span><span className="text-right">Updated</span>
+    <div className="@container px-2 pb-2">
+      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase", PR_GRID)}>
+        <span>Pull request</span><span className="hidden @lg:block">Head verdicts</span><span className="text-right">Geomean</span><span className="hidden text-right @md:block">Updated</span>
       </div>
       {pullRequests.map((pr) => {
         const s = pr.report.summary;
         const change = geomean(pr);
         return (
-          <Link key={pr.id} to={`/pr/${pr.id}`} className="hover:bg-accent/50 grid grid-cols-[minmax(0,1fr)_10rem_5.5rem_5.5rem] items-center gap-4 rounded-lg px-3 py-2.5">
+          <Link key={pr.id} to={`/pr/${pr.id}`} className={cn("hover:bg-accent/50 grid items-center gap-4 rounded-lg px-3 py-2.5", PR_GRID)}>
             <span className="flex min-w-0 items-center gap-3">
               <span className="bg-well text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-lg border">
                 {pr.source === "GITHUB" ? <GitPullRequest className="size-4" /> : <GitBranch className="size-4" />}
@@ -161,7 +163,7 @@ function PullRequestRows({ pullRequests }: { pullRequests: PullRequest[] }) {
                 <span className="text-muted-foreground block truncate font-mono text-[11px]">{pr.baseRef} ← {pr.headRef} · {pr.commits.length} commits</span>
               </span>
             </span>
-            <span className="grid gap-1.5">
+            <span className="hidden gap-1.5 @lg:grid">
               <SegmentedBar legend={false} segments={(["REGRESSION", "INCONCLUSIVE", "UNCHANGED", "IMPROVEMENT"] as const).map((verdict) => ({
                 key: verdict, label: verdictLabel[verdict], color: verdictVar[verdict],
                 value: verdict === "REGRESSION" ? s.regressions : verdict === "IMPROVEMENT" ? s.improvements : verdict === "UNCHANGED" ? s.unchanged : s.inconclusive,
@@ -175,7 +177,7 @@ function PullRequestRows({ pullRequests }: { pullRequests: PullRequest[] }) {
               </span>
             </span>
             <span className="text-right">{change !== null ? <DeltaPill ratio={change} verdict={change > 1.02 ? "REGRESSION" : change < 0.98 ? "IMPROVEMENT" : "UNCHANGED"} /> : <span className="text-muted-foreground">—</span>}</span>
-            <span className="text-muted-foreground text-right text-xs">{relativeTime(pr.updatedAt ?? pr.syncedAt)}</span>
+            <span className="text-muted-foreground hidden text-right text-xs @md:block">{relativeTime(pr.updatedAt ?? pr.syncedAt)}</span>
           </Link>
         );
       })}
@@ -223,6 +225,10 @@ function BenchmarkRows({ repository, limit }: { repository: Repository; limit?: 
   );
 }
 
+// Names keep their space first; secondary columns appear as the card widens (container queries).
+const COMPACT_GRID = "grid-cols-[minmax(8rem,1fr)_5rem] @sm:grid-cols-[minmax(8rem,1fr)_5rem_5.5rem] @md:grid-cols-[minmax(8rem,1fr)_4.5rem_5rem_5.5rem]";
+const SELECTABLE_GRID = "grid-cols-[1.25rem_minmax(8rem,1fr)_5rem] @sm:grid-cols-[1.25rem_minmax(8rem,1fr)_5rem_5.5rem] @md:grid-cols-[1.25rem_minmax(8rem,1fr)_4.5rem_5rem_5.5rem] @lg:grid-cols-[1.25rem_minmax(8rem,1fr)_4.5rem_5rem_4rem_5.5rem]";
+
 function ProfileRows({ repository, selectable = false }: { repository: Repository; selectable?: boolean }) {
   const [selected, setSelected] = useState<string[]>([]);
   const navigate = useNavigate();
@@ -231,7 +237,7 @@ function ProfileRows({ repository, selectable = false }: { repository: Repositor
   }
   const toggle = (id: string) => setSelected((current) => current.includes(id) ? current.filter((entry) => entry !== id) : [...current.slice(-1), id]);
   return (
-    <div className="px-2 pb-2">
+    <div className="@container px-2 pb-2">
       {selectable && (
         <div className="flex items-center gap-3 px-3 pb-2">
           <span className="text-muted-foreground text-xs">{selected.length ? `${selected.length} of 2 selected (older is base)` : "Select two profiles to compare"}</span>
@@ -241,16 +247,15 @@ function ProfileRows({ repository, selectable = false }: { repository: Repositor
           }}><GitCompare /> Compare</Button>
         </div>
       )}
-      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase",
-        selectable ? "grid-cols-[1.25rem_minmax(0,1fr)_5.5rem_6rem_5rem_6rem]" : "grid-cols-[minmax(0,1fr)_5.5rem_6rem_6rem]")}>
-        {selectable && <span />}<span>Series</span><span>Commit</span><span className="text-right">CPU / iter</span>{selectable && <span className="text-right">Symbols</span>}<span className="text-right">Recorded</span>
+      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase", selectable ? SELECTABLE_GRID : COMPACT_GRID)}>
+        {selectable && <span />}<span>Series</span><span className="hidden @md:block">Commit</span><span className="text-right">CPU / iter</span>
+        {selectable && <span className="hidden text-right @lg:block">Symbols</span>}<span className="hidden text-right @sm:block">Recorded</span>
       </div>
       {repository.profiles.map((profile) => {
         const m = profile.measurement;
         return (
           <div key={profile.id} className={cn("hover:bg-accent/50 grid items-center gap-4 rounded-lg px-3 py-2",
-            selectable ? "grid-cols-[1.25rem_minmax(0,1fr)_5.5rem_6rem_5rem_6rem]" : "grid-cols-[minmax(0,1fr)_5.5rem_6rem_6rem]",
-            selected.includes(profile.id) && "bg-accent")}>
+            selectable ? SELECTABLE_GRID : COMPACT_GRID, selected.includes(profile.id) && "bg-accent")}>
             {selectable && <Checkbox checked={selected.includes(profile.id)} onCheckedChange={() => toggle(profile.id)} aria-label="Select profile" />}
             <Link to={`/profiles/${profile.id}`} className="flex min-w-0 items-center gap-2.5">
               <Flame className="size-3.5 shrink-0 text-orange-500" />
@@ -259,10 +264,10 @@ function ProfileRows({ repository, selectable = false }: { repository: Repositor
                 <span className="block truncate text-sm">{m.caseKey === "default" ? seriesName(m.benchmark.key, m.caseKey) : m.caseKey}</span>
               </span>
             </Link>
-            <span className="font-mono text-xs">{m.commitSha?.slice(0, 7) ?? "—"}{m.dirty ? "*" : ""}</span>
+            <span className="hidden font-mono text-xs @md:block">{m.commitSha?.slice(0, 7) ?? "—"}{m.dirty ? "*" : ""}</span>
             <span className="text-right font-mono text-sm tabular-nums">{profile.cpuMs >= 1000 ? `${(profile.cpuMs / 1000).toFixed(2)} s` : `${profile.cpuMs.toFixed(1)} ms`}</span>
-            {selectable && <span className="text-muted-foreground text-right font-mono text-xs">{(profile.symbolicatedShare * 100).toFixed(0)}%</span>}
-            <span className="text-muted-foreground text-right text-xs" title={dateTime(profile.recordedAt)}>{relativeTime(profile.recordedAt)}</span>
+            {selectable && <span className="text-muted-foreground hidden text-right font-mono text-xs @lg:block">{(profile.symbolicatedShare * 100).toFixed(0)}%</span>}
+            <span className="text-muted-foreground hidden text-right text-xs @sm:block" title={dateTime(profile.recordedAt)}>{relativeTime(profile.recordedAt)}</span>
           </div>
         );
       })}
@@ -301,7 +306,8 @@ export function RepositoryOverviewPage() {
             <Stat label="CPU profiles" value={repository.profileCount} detail={repository.profiles[0] ? `latest ${relativeTime(repository.profiles[0].recordedAt)}` : "none yet"} />
           </StatStrip>
         </Panel>
-        <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
+        {/* Side by side only when both cards have room for their columns; otherwise they stack. */}
+        <div className="grid items-start gap-5 2xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
           <Panel>
             <PanelHeader icon={GitPullRequest} title="Pull requests" subtitle="Head vs base across all measured series"
               actions={<>

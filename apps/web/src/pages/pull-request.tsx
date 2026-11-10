@@ -28,7 +28,7 @@ type Filter = "all" | "changed" | "regressions" | "improvements" | "profiled";
 type View = "list" | "matrix" | "chart";
 
 // Columns collapse with the panel's width (container queries): trend and interval appear when there is room.
-const ROW_GRID = "grid-cols-[minmax(7rem,1fr)_auto_4rem_1rem] @lg:grid-cols-[minmax(7rem,1fr)_auto_7rem_4rem_1rem] @2xl:grid-cols-[minmax(8rem,1fr)_auto_5.5rem_8rem_4rem_1rem]";
+const ROW_GRID = "grid-cols-[minmax(7rem,1fr)_auto_4rem_1rem] @md:grid-cols-[minmax(7rem,1fr)_auto_6rem_4rem_1rem] @xl:grid-cols-[minmax(8rem,1fr)_auto_5rem_7rem_4rem_1rem]";
 
 const value = (statistic: Statistic, m: { mean: number; median: number }) => statistic === "MEAN" ? m.mean : m.median;
 
@@ -76,9 +76,9 @@ function SeriesRow({ series, columns, statistic, threshold, extent, selected, on
         <span className="block truncate text-sm font-medium">{series.caseKey === "default" ? series.benchmark.title ?? series.label : series.caseKey}</span>
       </span>
       <Ticks ticks={seriesTicks(series, columns)} size="sm" />
-      <span className="hidden @2xl:block"><Sparkline values={values} reference={reference ? value(statistic, reference) : undefined} color={color} width={88} height={22} /></span>
-      <span className="hidden @lg:block">
-        {comparison ? <IntervalGlyph ratio={comparison.ratio} low={comparison.low} high={comparison.high} verdict={comparison.verdict} threshold={threshold} extent={extent} width={112} />
+      <span className="hidden @xl:block"><Sparkline values={values} reference={reference ? value(statistic, reference) : undefined} color={color} width={80} height={22} /></span>
+      <span className="hidden @md:block">
+        {comparison ? <IntervalGlyph ratio={comparison.ratio} low={comparison.low} high={comparison.high} verdict={comparison.verdict} threshold={threshold} extent={extent} width={96} />
           : <span className="text-muted-foreground font-mono text-[11px]">{series.head ? "single commit" : "head not measured"}</span>}
       </span>
       <span className="text-right font-mono text-sm font-medium tabular-nums" style={{ color: comparison ? verdictText(comparison.verdict) : undefined }}>
@@ -356,8 +356,8 @@ export function PullRequestPage() {
             {view === "list" && (
               <div className="@container px-2 pb-2">
                 <div className={cn("text-muted-foreground grid gap-3 px-3 pb-1.5 font-mono text-[10px] tracking-wide whitespace-nowrap uppercase", ROW_GRID)}>
-                  <span>Series</span><span style={{ width: columns.length * 9 - 3 }}>Commits</span><span className="hidden @2xl:block">Trend</span>
-                  <span className="hidden @lg:block">Head · 95% CI</span><span className="text-right">Δ head</span><span />
+                  <span>Series</span><span style={{ width: columns.length * 9 - 3 }}>Commits</span><span className="hidden @xl:block">Trend</span>
+                  <span className="hidden @md:block">Head · 95% CI</span><span className="text-right">Δ head</span><span />
                 </div>
                 {visible.map((series) => (
                   <SeriesRow key={series.id} series={series} columns={columns} statistic={statistic} threshold={threshold} extent={extent}

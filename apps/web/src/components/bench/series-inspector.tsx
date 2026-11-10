@@ -1,6 +1,7 @@
 import { Link } from "react-router";
 import { ChevronLeft, ChevronRight, Flame, GitCompare, LineChart } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { DistributionChart, TrendChart, type TrendPoint } from "@/components/bench/series-charts";
 import { VerdictBadge } from "@/components/bench/states";
@@ -132,13 +133,25 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
         <div className="flex flex-wrap items-center gap-2">
           <MicroLabel>Compare</MicroLabel>
           <Segmented
-            value={scope.kind === "head" ? "head" : String(scope.position)}
-            onChange={(entry) => onScopeChange(entry === "head" ? { kind: "head" } : { kind: "step", position: Number(entry) })}
+            value={scope.kind}
+            onChange={(entry) => onScopeChange(entry === "head" ? { kind: "head" } : { kind: "step", position: steps.at(-1)?.position ?? 0 })}
             options={[
-              { value: "head", label: series.head ? "Head vs ref" : "Latest vs ref" },
-              ...steps.map((point) => ({ value: String(point.position), label: `${pointLabel(point)}${point.spansGap ? "*" : ""} step` })),
+              { value: "head", label: series.head ? "Head vs reference" : "Latest vs reference" },
+              ...(steps.length ? [{ value: "step" as const, label: "Commit step" }] : []),
             ]}
           />
+          {scope.kind === "step" && (
+            <Select value={String(scope.position)} onValueChange={(entry) => onScopeChange({ kind: "step", position: Number(entry) })}>
+              <SelectTrigger size="sm" className="min-w-40"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                {steps.map((point) => (
+                  <SelectItem key={point.position} value={String(point.position)}>
+                    {pointLabel(point)} vs #{point.previousPosition === 0 ? "base" : point.previousPosition} · {percentFromRatio(point.vsPrevious!.ratio, 1)}{point.spansGap ? " · spans gap" : ""}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          )}
         </div>
 
         <Well className="p-4">
