@@ -1,0 +1,68 @@
+import { z } from "zod";
+
+const text = z.string().max(16_384);
+const key = z.string().min(1).max(200).regex(/^[a-z0-9][a-z0-9._/-]*$/, "Use lowercase letters, digits, '.', '_', '-' and '/'.");
+const revision = z.string().min(1).max(256);
+
+export const CaseMetadata = z.object({
+	/** Series key within the benchmark; the same key at different commits forms one line. */
+	case: key.optional(),
+	name: text.optional(),
+	command: text.optional(),
+	/** Measured source revision (SHA, branch or `HEAD~1`), resolved in the checkout. */
+	commit: revision.optional(),
+	/** Whether the measured build had uncommitted changes on top of `commit`. */
+	dirty: z.boolean().optional(),
+	revision: text.optional(),
+	build: text.optional(),
+	notes: text.optional(),
+}).strict();
+
+export const MachineMetadata = z.object({
+	hostname: z.string().min(1).max(256),
+	os: z.string().min(1).max(256),
+	arch: z.string().min(1).max(64),
+	cpu: z.string().min(1).max(256),
+	ram: z.number().int().nonnegative(),
+}).strict();
+
+export const IngestMetadata = z.object({
+	/** Stable benchmark identity, e.g. `variant/strip-nulls`; defaults to a slug of the title. */
+	benchmark: key.optional(),
+	title: text.optional(),
+	description: text.optional(),
+	/** One-based case used as the in-run comparison baseline. */
+	baseline: z.number().int().positive().optional(),
+	warmup: z.number().int().nonnegative().optional(),
+	conditions: text.optional(),
+	environment: text.optional(),
+	invocation: text.optional(),
+	notes: text.optional(),
+	/** Defaults applied to cases that omit them. */
+	commit: revision.optional(),
+	dirty: z.boolean().optional(),
+	build: text.optional(),
+	/** Pull request to synchronize after ingesting: number, `owner/name#123` or URL. */
+	pullRequest: z.union([z.number().int().positive(), z.string().min(1).max(512)]).optional(),
+	machine: MachineMetadata.optional(),
+	cases: z.array(CaseMetadata).max(512).optional(),
+}).strict();
+
+export type CaseMetadata = z.infer<typeof CaseMetadata>;
+export type IngestMetadata = z.infer<typeof IngestMetadata>;
+export type MachineMetadata = z.infer<typeof MachineMetadata>;
+
+export function parseMetadata(value: unknown): IngestMetadata {
+	const result = IngestMetadata.safeParse(value ?? {});
+	if (!result.success) {
+		throw new Error("Invalid benchmark metadata:\n" + result.error.issues
+			.map((issue) => `  ${issue.path.join(".") || "(root)"}: ${issue.message}`).join("\n"));
+	}
+	return result.data;
+}
+
+export function slug(value: string, fallback = "default", allowSlash = true): string {
+	const result = value.toLowerCase().normalize("NFKD").replace(allowSlash ? /[^a-z0-9._/-]+/g : /[^a-z0-9._-]+/g, "-")
+		.replace(/-{2,}/g, "-").replace(/^[^a-z0-9]+|[-./]+$/g, "").slice(0, 120).replace(/[-./]+$/, "");
+	return result || fallback;
+}

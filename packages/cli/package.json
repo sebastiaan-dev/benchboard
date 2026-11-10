@@ -1,0 +1,17 @@
+{
+  "name": "@benchboard/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "benchboard": "./bin/benchboard.ts" },
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "dev": "node --watch-path=src --watch-path=../core/src --watch-path=../graphql bin/benchboard.ts serve"
+  },
+  "dependencies": {
+    "@benchboard/core": "workspace:*",
+    "@benchboard/graphql": "workspace:*",
+    "graphql": "^16.11.0",
+    "graphql-yoga": "^6.0.1"
+  }
+}

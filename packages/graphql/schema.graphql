@@ -1,0 +1,273 @@
+"""
+Benchboard: Hyperfine measurements attributed to commits, pull requests and machines.
+Times are in seconds. Ratios compare candidate / reference; above 1 is slower.
+"""
+type Query {
+  repositories: [Repository!]!
+  repository(slug: String, id: ID): Repository
+  pullRequest(id: ID!): PullRequest
+  run(id: ID!): Run
+  measurement(id: ID!): Measurement
+  "Measurements by ID, in request order; unknown IDs are omitted."
+  measurements(ids: [ID!]!): [Measurement!]!
+  benchmark(id: ID!): Benchmark
+  machine(id: ID!): Machine
+  "Runs across all repositories, newest first."
+  runs(limit: Int = 50, offset: Int = 0): [Run!]!
+}
+
+type Mutation {
+  "Fetches the latest commits of a tracked pull request or branch (via gh or git)."
+  syncPullRequest(id: ID!): PullRequest!
+  "Starts tracking a GitHub pull request: `123`, `owner/name#123` or a URL."
+  trackGithubPullRequest(repository: ID!, reference: String!): PullRequest!
+  deleteRun(id: ID!): Boolean!
+}
+
+type Repository {
+  id: ID!
+  slug: String!
+  name: String!
+  remoteUrl: String
+  githubRepo: String
+  localPath: String
+  pullRequests: [PullRequest!]!
+  benchmarks: [Benchmark!]!
+  runs(limit: Int = 50, offset: Int = 0): [Run!]!
+  runCount: Int!
+  commit(sha: String!): Commit
+}
+
+type Commit {
+  sha: String!
+  shortSha: String!
+  subject: String
+  author: String
+  authoredAt: String
+  committedAt: String
+  parents: [String!]!
+  url: String
+  measurements: [Measurement!]!
+  pullRequests: [PullRequest!]!
+}
+
+enum PullRequestSource {
+  GITHUB
+  LOCAL
+}
+
+type PullRequest {
+  id: ID!
+  repository: Repository!
+  source: PullRequestSource!
+  githubRepo: String
+  number: Int
+  title: String!
+  url: String
+  state: String!
+  author: String
+  headRef: String!
+  headSha: String!
+  baseRef: String!
+  baseSha: String
+  updatedAt: String
+  syncedAt: String!
+  baseCommit: Commit
+  "PR commits, oldest first, excluding the base."
+  commits: [Commit!]!
+  report(statistic: Statistic = MEDIAN, includeDirty: Boolean = false, machine: ID, threshold: Float = 0.02): PullRequestReport!
+}
+
+enum Statistic {
+  MEDIAN
+  MEAN
+}
+
+enum Verdict {
+  REGRESSION
+  IMPROVEMENT
+  UNCHANGED
+  INCONCLUSIVE
+  FAILED
+}
+
+type PullRequestReport {
+  statistic: Statistic!
+  threshold: Float!
+  includeDirty: Boolean!
+  "Machine whose measurements are compared; comparisons never mix machines."
+  machine: Machine
+  machines: [MachineCount!]!
+  "Base (position 0) followed by PR commits."
+  commits: [ReportCommit!]!
+  series: [SeriesReport!]!
+  summary: ReportSummary!
+}
+
+type MachineCount {
+  machine: Machine!
+  count: Int!
+}
+
+type ReportCommit {
+  position: Int!
+  isBase: Boolean!
+  commit: Commit!
+}
+
+type ReportSummary {
+  series: Int!
+  regressions: Int!
+  improvements: Int!
+  unchanged: Int!
+  inconclusive: Int!
+  failed: Int!
+  "Series whose first measurement is not at the PR base."
+  missingReference: Int!
+  "Head comparisons whose sides come from different Hyperfine runs."
+  crossRun: Int!
+}
+
+type SeriesReport {
+  id: ID!
+  benchmark: Benchmark!
+  caseKey: String!
+  label: String!
+  points: [ReportPoint!]!
+  reference: ReportPoint
+  referenceIsBase: Boolean!
+  latest: ReportPoint
+  latestComparison: Comparison
+  verdict: Verdict
+}
+
+type ReportPoint {
+  position: Int!
+  isBase: Boolean!
+  commit: Commit!
+  "Representative measurement: passing, clean and most recent first."
+  measurement: Measurement
+  "All matching measurements at this commit, representative first."
+  candidates: [Measurement!]!
+  vsReference: Comparison
+  vsPrevious: Comparison
+}
+
+type Comparison {
+  candidate: Measurement!
+  baseline: Measurement!
+  statistic: Statistic!
+  ratio: Float!
+  "Relative change in percent: (ratio - 1) * 100."
+  changePercent: Float!
+  "Percentile-bootstrap 95% interval of the ratio."
+  low: Float!
+  high: Float!
+  resamples: Int!
+  verdict: Verdict!
+  sameRun: Boolean!
+}
+
+type Benchmark {
+  id: ID!
+  key: String!
+  title: String
+  description: String
+  repository: Repository!
+  cases: [BenchmarkCase!]!
+  runs(limit: Int = 50, offset: Int = 0): [Run!]!
+}
+
+type BenchmarkCase {
+  caseKey: String!
+  count: Int!
+  lastRecordedAt: String!
+  "Chronological measurements of this series."
+  measurements(limit: Int = 500): [Measurement!]!
+}
+
+type Machine {
+  id: ID!
+  hostname: String!
+  os: String!
+  arch: String!
+  cpu: String!
+  ram: Float!
+}
+
+type Run {
+  id: ID!
+  repository: Repository!
+  machine: Machine!
+  recordedAt: String!
+  title: String
+  conditions: String
+  environment: String
+  invocation: String
+  warmup: Int
+  notes: String
+  "One-based in-run comparison baseline."
+  baselinePosition: Int
+  exportSha256: String!
+  exportPath: String!
+  sourcePath: String
+  checkoutPath: String
+  checkoutHead: String
+  checkoutBranch: String
+  checkoutDirty: Boolean
+  legacyId: String
+  measurements: [Measurement!]!
+  "Each repeated series (same benchmark and case) compared with its first measurement in this run."
+  pairedComparisons(statistic: Statistic = MEDIAN, threshold: Float = 0.02): [Comparison!]!
+}
+
+enum MeasurementStatus {
+  PASSED
+  FAILED
+  UNVERIFIED
+}
+
+type Measurement {
+  id: ID!
+  run: Run!
+  position: Int!
+  benchmark: Benchmark!
+  caseKey: String!
+  label: String!
+  command: String
+  exportedCommand: String!
+  commitSha: String
+  commit: Commit
+  dirty: Boolean
+  "Commit was defaulted to the checkout HEAD or inferred from notes, not recorded explicitly."
+  commitInferred: Boolean!
+  revision: String
+  build: String
+  notes: String
+  parameters: [Parameter!]
+  status: MeasurementStatus!
+  n: Int!
+  mean: Float!
+  stddev: Float
+  median: Float!
+  min: Float!
+  max: Float!
+  q1: Float!
+  q3: Float!
+  p95: Float!
+  cv: Float
+  userTime: Float
+  systemTime: Float
+  rssMedian: Float
+  rssPeak: Float
+  recordedAt: String!
+  times: [Float!]!
+  exitCodes: [Int!]
+  "Bootstrap comparison of this measurement against another (e.g. the run's baseline case)."
+  compare(baseline: ID!, statistic: Statistic = MEDIAN, threshold: Float = 0.02): Comparison
+}
+
+type Parameter {
+  name: String!
+  value: String!
+}

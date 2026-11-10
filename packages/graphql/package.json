@@ -1,0 +1,13 @@
+{
+  "name": "@benchboard/graphql",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./schema.graphql": "./schema.graphql" },
+  "scripts": { "typecheck": "tsc -p ." },
+  "dependencies": {
+    "@benchboard/core": "workspace:*",
+    "@graphql-tools/schema": "^11.0.9",
+    "graphql": "^16.11.0"
+  }
+}
