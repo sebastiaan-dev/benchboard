@@ -1,7 +1,6 @@
 import { Link } from "react-router";
 import { graphql } from "@/gql";
-import { Badge } from "@/components/ui/badge";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Pill, verdictVar } from "@/components/kit/encodings";
 import { dateTime, relativeTime } from "@/lib/format";
 import type { RunRowFragment } from "@/gql/graphql";
 
@@ -13,50 +12,42 @@ export const RunRow = graphql(`
     legacyId
     repository { id name }
     machine { hostname }
-    measurements { id status commitSha dirty benchmark { key } }
+    measurements { id status commitSha dirty benchmark { key } profiles { id } }
   }
 `);
 
+const GRID = "grid-cols-[minmax(0,1fr)_minmax(0,11rem)_8rem_3.5rem_7rem_6rem]";
+
 export function RunsTable({ runs, showRepository = false }: { runs: RunRowFragment[]; showRepository?: boolean }) {
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead>Run</TableHead>
-          {showRepository && <TableHead>Repository</TableHead>}
-          <TableHead>Benchmarks</TableHead>
-          <TableHead>Commits</TableHead>
-          <TableHead className="text-right">Cases</TableHead>
-          <TableHead>Machine</TableHead>
-          <TableHead className="text-right">Recorded</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {runs.map((run) => {
-          const benchmarks = [...new Set(run.measurements.map((m) => m.benchmark.key))];
-          const commits = [...new Set(run.measurements.map((m) => m.commitSha?.slice(0, 7) ?? "—"))];
-          const failed = run.measurements.filter((m) => m.status === "FAILED").length;
-          const dirty = run.measurements.some((m) => m.dirty);
-          return (
-            <TableRow key={run.id}>
-              <TableCell className="max-w-96">
-                <Link to={`/runs/${run.id}`} className="block truncate font-medium hover:underline">{run.title ?? run.id}</Link>
-                <div className="flex gap-1.5">
-                  {run.legacyId && <Badge variant="secondary" className="text-[10px]">imported</Badge>}
-                  {failed > 0 && <Badge variant="destructive" className="text-[10px]">{failed} failed</Badge>}
-                  {dirty && <Badge variant="outline" className="border-amber-500/40 text-[10px] text-amber-700 dark:text-amber-300">dirty</Badge>}
-                </div>
-              </TableCell>
-              {showRepository && <TableCell><Link to={`/repositories/${run.repository.id}`} className="hover:underline">{run.repository.name}</Link></TableCell>}
-              <TableCell className="text-muted-foreground max-w-56 truncate font-mono text-xs">{benchmarks.join(", ")}</TableCell>
-              <TableCell className="text-muted-foreground max-w-40 truncate font-mono text-xs">{commits.slice(0, 3).join(", ")}{commits.length > 3 ? ` +${commits.length - 3}` : ""}</TableCell>
-              <TableCell className="text-right tabular-nums">{run.measurements.length}</TableCell>
-              <TableCell className="text-muted-foreground text-xs">{run.machine.hostname}</TableCell>
-              <TableCell className="text-muted-foreground text-right text-xs" title={dateTime(run.recordedAt)}>{relativeTime(run.recordedAt)}</TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
+    <div>
+      <div className={`text-muted-foreground grid ${GRID} gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase`}>
+        <span>Run</span><span>Benchmarks</span><span>Commits</span><span className="text-right">Cases</span><span>Machine</span><span className="text-right">Recorded</span>
+      </div>
+      {runs.map((run) => {
+        const benchmarks = [...new Set(run.measurements.map((m) => m.benchmark.key))];
+        const commits = [...new Set(run.measurements.map((m) => m.commitSha?.slice(0, 7) ?? "—"))];
+        const failed = run.measurements.filter((m) => m.status === "FAILED").length;
+        const dirty = run.measurements.some((m) => m.dirty);
+        const profiles = run.measurements.reduce((sum, m) => sum + m.profiles.length, 0);
+        return (
+          <Link key={run.id} to={`/runs/${run.id}`} className={`hover:bg-accent/50 grid ${GRID} items-center gap-4 rounded-lg px-3 py-2`}>
+            <span className="flex min-w-0 items-center gap-2">
+              <span className="truncate text-sm">{run.title ?? run.id}</span>
+              {showRepository && <span className="text-muted-foreground truncate text-xs">{run.repository.name}</span>}
+              {failed > 0 && <Pill color={verdictVar.FAILED} className="h-5 text-[10.5px]">{failed} failed</Pill>}
+              {dirty && <Pill color="var(--warn)" className="h-5 text-[10.5px]">dirty</Pill>}
+              {profiles > 0 && <Pill color="oklch(0.72 0.17 50)" className="h-5 text-[10.5px]">{profiles} profile{profiles > 1 ? "s" : ""}</Pill>}
+              {run.legacyId && <Pill className="h-5 text-[10.5px]">imported</Pill>}
+            </span>
+            <span className="text-muted-foreground truncate font-mono text-[11px]">{benchmarks.join(", ")}</span>
+            <span className="text-muted-foreground truncate font-mono text-[11px]">{commits.slice(0, 2).join(", ")}{commits.length > 2 ? ` +${commits.length - 2}` : ""}</span>
+            <span className="text-right font-mono text-xs tabular-nums">{run.measurements.length}</span>
+            <span className="text-muted-foreground truncate font-mono text-[11px]">{run.machine.hostname}</span>
+            <span className="text-muted-foreground text-right text-xs" title={dateTime(run.recordedAt)}>{relativeTime(run.recordedAt)}</span>
+          </Link>
+        );
+      })}
+    </div>
   );
 }

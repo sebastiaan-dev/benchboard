@@ -40,6 +40,8 @@ type Repository {
   runs(limit: Int = 50, offset: Int = 0): [Run!]!
   runCount: Int!
   commit(sha: String!): Commit
+  "Profiles attached to this repository's measurements, newest first."
+  profiles(limit: Int = 100): [Profile!]!
 }
 
 type Commit {

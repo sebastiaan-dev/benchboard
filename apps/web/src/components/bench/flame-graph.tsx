@@ -61,28 +61,30 @@ function hash(text: string): number {
 }
 
 function libraryColor(node: FlameNode): string {
-  if (node.depth === 0) return "hsl(220 10% 55%)";
-  if (node.thread) return "hsl(220 14% 62%)";
+  if (node.depth === 0) return "oklch(0.7 0.01 264)";
+  if (node.thread) return "oklch(0.76 0.02 264)";
   // Warm hues for the profiled program, cooler hues for system and runtime libraries.
   const library = node.library ?? "";
   const system = /^(lib(system|c|dyld|objc|pthread|m|stdc\+\+|c\+\+)|dyld|ld-linux|libsystem_)/.test(library);
   // Hue varies by function (classic flame graph palette), so single-binary programs stay readable.
   const h = hash(node.name);
-  const hue = system ? 185 + (h % 45) : 4 + (h % 46);
-  const light = 56 + ((h >>> 8) % 14);
-  return `hsl(${hue} ${system ? 40 : 78}% ${light}%)`;
+  const hue = system ? 200 + (h % 50) : 25 + (h % 55);
+  const light = 0.74 + ((h >>> 8) % 10) / 100;
+  return `oklch(${light.toFixed(2)} ${system ? 0.06 : 0.11} ${hue})`;
 }
 
 export function diffColor(base: number, head: number): string {
   const max = Math.max(base, head);
-  if (max <= 0) return "hsl(0 0% 60%)";
+  if (max <= 0) return "oklch(0.74 0.008 264)";
   const relative = (head - base) / max;
-  if (Math.abs(relative) < 0.03) return "hsl(220 6% 62%)";
-  const strength = Math.min(1, Math.abs(relative));
-  return relative > 0 ? `hsl(0 ${45 + strength * 40}% ${74 - strength * 26}%)` : `hsl(212 ${45 + strength * 40}% ${74 - strength * 26}%)`;
+  if (Math.abs(relative) < 0.03) return "oklch(0.74 0.008 264)";
+  // Tints stay light enough for dark text; chroma grows with the relative change.
+  const strength = Math.min(1, Math.abs(relative)) ** 0.8;
+  const light = 0.84 - strength * 0.16;
+  return relative > 0 ? `oklch(${light.toFixed(3)} ${(0.05 + strength * 0.13).toFixed(3)} 25)` : `oklch(${light.toFixed(3)} ${(0.04 + strength * 0.1).toFixed(3)} 245)`;
 }
 
-const ROW = 20;
+const ROW = 22;
 
 interface Layout {
   node: FlameNode;
@@ -125,15 +127,16 @@ const Boxes = memo(function Boxes({ boxes, diff, matches, focus }: {
       <div
         key={`${node.id}:${depth}`}
         data-node={node.id}
-        className={cn("absolute cursor-pointer overflow-hidden border-r border-b border-background/70 px-1 text-[11px] leading-[19px] whitespace-nowrap text-neutral-950",
-          above && "opacity-60")}
+        className={cn("absolute cursor-pointer overflow-hidden rounded-[4px] px-1.5 text-[11px] leading-[18px] whitespace-nowrap text-neutral-950 transition-opacity hover:brightness-110",
+          above && "opacity-55")}
         style={{
-          left: x, top: depth * ROW, width, height: ROW,
+          // Small gaps between blocks give the rounded, tiled look of the references.
+          left: x + 1, top: depth * ROW + 1, width: Math.max(1, width - 2), height: ROW - 2,
           background: diff && node.base !== undefined ? diffColor(node.base, node.head ?? 0) : libraryColor(node),
           opacity: dimmed ? 0.25 : undefined,
         }}
       >
-        {width > 28 ? node.name : ""}
+        {width > 32 ? node.name : ""}
       </div>
     );
   });
@@ -209,8 +212,8 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
       </div>
       <div
         ref={container}
-        className="relative w-full rounded-md border bg-muted/30"
-        style={{ height: depth * ROW + 2 }}
+        className="bg-well relative w-full rounded-xl border p-1"
+        style={{ height: depth * ROW + 10 }}
         onMouseMove={(event) => {
           const node = nodeAt(event);
           setHover(node ? { node, x: event.clientX, y: event.clientY } : null);
@@ -221,7 +224,7 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
           if (node) setFocus(node === focus && node.parent ? node.parent : node);
         }}
       >
-        <div className="absolute inset-0 overflow-hidden rounded-md">
+        <div className="absolute inset-1 overflow-hidden rounded-lg">
           <Boxes boxes={boxes} diff={diff} matches={matches} focus={focus} />
         </div>
         {hover && (

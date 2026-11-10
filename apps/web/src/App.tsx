@@ -1,55 +1,54 @@
-import { Link, Route, Routes, useLocation } from "react-router";
-import { Activity, Moon, Sun } from "lucide-react";
-import { useTheme } from "next-themes";
-import { Button } from "@/components/ui/button";
 import { lazy, Suspense } from "react";
-import { LoadingState, NotFound } from "@/components/bench/states";
+import { Navigate, Route, Routes } from "react-router";
+import { graphql } from "@/gql";
+import { AppShell, useCurrentRepository } from "@/components/shell";
+import { EmptyState, LoadingState, NotFound } from "@/components/bench/states";
+import { useGraphQL } from "@/lib/graphql";
 
 // Pages are split so the charting code only loads where it is used.
-const HomePage = lazy(() => import("@/pages/home").then((m) => ({ default: m.HomePage })));
-const RepositoryPage = lazy(() => import("@/pages/repository").then((m) => ({ default: m.RepositoryPage })));
-const PullRequestPage = lazy(() => import("@/pages/pull-request").then((m) => ({ default: m.PullRequestPage })));
-const RunPage = lazy(() => import("@/pages/run").then((m) => ({ default: m.RunPage })));
-const ProfilePage = lazy(() => import("@/pages/profile").then((m) => ({ default: m.ProfilePage })));
-const ProfileComparePage = lazy(() => import("@/pages/profile-compare").then((m) => ({ default: m.ProfileComparePage })));
-const BenchmarkPage = lazy(() => import("@/pages/benchmark").then((m) => ({ default: m.BenchmarkPage })));
+const page = <K extends string>(load: () => Promise<Record<K, React.ComponentType>>, name: K) =>
+  lazy(() => load().then((module) => ({ default: module[name] })));
+const RepositoryOverviewPage = page(() => import("@/pages/repository"), "RepositoryOverviewPage");
+const PullRequestsPage = page(() => import("@/pages/repository"), "PullRequestsPage");
+const BenchmarksPage = page(() => import("@/pages/repository"), "BenchmarksPage");
+const RunsPage = page(() => import("@/pages/repository"), "RunsPage");
+const ProfilesPage = page(() => import("@/pages/repository"), "ProfilesPage");
+const PullRequestPage = page(() => import("@/pages/pull-request"), "PullRequestPage");
+const RunPage = page(() => import("@/pages/run"), "RunPage");
+const BenchmarkPage = page(() => import("@/pages/benchmark"), "BenchmarkPage");
+const ProfilePage = page(() => import("@/pages/profile"), "ProfilePage");
+const ProfileComparePage = page(() => import("@/pages/profile-compare"), "ProfileComparePage");
 
-function ThemeToggle() {
-  const { resolvedTheme, setTheme } = useTheme();
-  const dark = resolvedTheme === "dark";
+const HomeQuery = graphql(`
+  query HomeRepositories { repositories { id } }
+`);
+
+/** The landing page is the current repository's overview. */
+function Home() {
+  const current = useCurrentRepository();
+  const query = useGraphQL(HomeQuery, {});
+  if (query.isPending) return <LoadingState rows={1} />;
+  const target = current ?? query.data?.repositories[0]?.id;
+  if (target) return <Navigate to={`/repositories/${target}`} replace />;
   return (
-    <Button variant="ghost" size="icon" aria-label="Toggle theme" onClick={() => setTheme(dark ? "light" : "dark")}>
-      {dark ? <Sun /> : <Moon />}
-    </Button>
+    <EmptyState title="Nothing recorded yet">
+      Run <code>benchboard ingest export.json --benchmark my/bench</code> inside a git checkout, or import pi's history with{" "}
+      <code>benchboard import-legacy</code>.
+    </EmptyState>
   );
 }
 
 export function App() {
-  const location = useLocation();
   return (
-    <div className="min-h-svh bg-background text-foreground">
-      <header className="sticky top-0 z-30 border-b bg-background/80 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-[1440px] items-center gap-4 px-6">
-          <Link to="/" className="flex items-center gap-2 font-semibold tracking-tight">
-            <span className="flex size-7 items-center justify-center rounded-md bg-foreground text-background">
-              <Activity className="size-4" />
-            </span>
-            Benchboard
-          </Link>
-          <span className="text-muted-foreground hidden text-sm md:inline">Performance across commits</span>
-          <div className="ml-auto flex items-center gap-1">
-            <Button variant="ghost" size="sm" asChild>
-              <a href="/graphql" target="_blank" rel="noreferrer">GraphQL</a>
-            </Button>
-            <ThemeToggle />
-          </div>
-        </div>
-      </header>
-      <main key={location.pathname} className="mx-auto max-w-[1440px] px-6 py-8">
-        <Suspense fallback={<LoadingState rows={1} />}>
+    <AppShell>
+      <Suspense fallback={<LoadingState rows={1} />}>
         <Routes>
-          <Route path="/" element={<HomePage />} />
-          <Route path="/repositories/:id" element={<RepositoryPage />} />
+          <Route path="/" element={<Home />} />
+          <Route path="/repositories/:id" element={<RepositoryOverviewPage />} />
+          <Route path="/repositories/:id/pulls" element={<PullRequestsPage />} />
+          <Route path="/repositories/:id/benchmarks" element={<BenchmarksPage />} />
+          <Route path="/repositories/:id/runs" element={<RunsPage />} />
+          <Route path="/repositories/:id/profiles" element={<ProfilesPage />} />
           <Route path="/pr/:id" element={<PullRequestPage />} />
           <Route path="/runs/:id" element={<RunPage />} />
           <Route path="/benchmarks/:id" element={<BenchmarkPage />} />
@@ -57,8 +56,7 @@ export function App() {
           <Route path="/profiles/:id" element={<ProfilePage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>
-        </Suspense>
-      </main>
-    </div>
+      </Suspense>
+    </AppShell>
   );
 }

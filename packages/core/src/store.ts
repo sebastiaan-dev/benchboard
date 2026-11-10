@@ -505,6 +505,11 @@ export class Store {
 			WHERE m.benchmark_id = ? AND m.case_key = ? ORDER BY r.recorded_at DESC, p.id DESC LIMIT ?`)
 			.all(benchmarkId, caseKey, limit).map(toProfile);
 	}
+	profilesForRepository(repositoryId: number, limit = 100): Profile[] {
+		return this.db.query(`SELECT ${PROFILE_COLUMNS.replace(/(^|,\s*)(\w)/g, "$1p.$2")} FROM profile p
+			JOIN measurement m ON m.id = p.measurement_id JOIN run r ON r.id = m.run_id
+			WHERE r.repository_id = ? ORDER BY p.recorded_at DESC, p.id DESC LIMIT ?`).all(repositoryId, limit).map(toProfile);
+	}
 	profileTree(id: number): CallTree {
 		const row = this.db.query("SELECT tree FROM profile WHERE id = ?").get(id) as { tree: Uint8Array } | null;
 		if (!row) throw new Error(`Unknown profile ${id}.`);

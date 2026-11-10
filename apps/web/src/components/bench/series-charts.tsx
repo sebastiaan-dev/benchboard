@@ -120,3 +120,45 @@ export function SamplesChart({ sets, commits }: { sets: SampleSet[]; commits: { 
   );
 }
 
+
+const distributionConfig = {
+  base: { label: "Reference", colors: { light: ["#a3a3a3"], dark: ["#6b6b73"] } },
+  head: { label: "Head", colors: { light: ["#2563eb"], dark: ["#7ea6f6"] } },
+} satisfies ChartConfig;
+
+/** Overlaid histograms (share of samples per bin) for the reference and head, with median markers. */
+export function DistributionChart({ base, head, bins = 24 }: { base: number[]; head: number[]; bins?: number }) {
+  const all = [...base, ...head].sort((a, b) => a - b);
+  if (!all.length) return null;
+  // Trim the outer 1% so a single outlier does not flatten the histogram.
+  const lo = all[Math.floor(all.length * 0.01)];
+  const hi = all[Math.min(all.length - 1, Math.ceil(all.length * 0.99) - 1)];
+  const width = (hi - lo) / bins || hi * 0.01 || 1;
+  const { scale, unit } = durationScale(hi);
+  const count = (values: number[]) => {
+    const histogram = new Array(bins).fill(0);
+    for (const value of values) histogram[Math.min(bins - 1, Math.max(0, Math.floor((value - lo) / width)))]++;
+    return histogram.map((n) => (values.length ? (n / values.length) * 100 : 0));
+  };
+  const a = count(base), b = count(head);
+  const median = (values: number[]) => {
+    const sorted = [...values].sort((x, y) => x - y);
+    return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
+  };
+  const label = (index: number) => `${+((lo + (index + 0.5) * width) * scale).toPrecision(3)}`;
+  const binOf = (value: number | null) => value === null ? null : label(Math.min(bins - 1, Math.max(0, Math.floor((value - lo) / width))));
+  const data = a.map((share, index) => ({ bin: label(index), base: share, head: b[index] }));
+  const mb = binOf(median(base)), mh = binOf(median(head));
+  return (
+    <EvilComposedChart className="aspect-auto h-48 w-full" data={data} config={distributionConfig} animationType="none" barGap={-8}
+      chartProps={{ margin: { left: 0, right: 8, top: 14, bottom: 0 } }}>
+      <EvilComposedChart.Grid />
+      <EvilComposedChart.XAxis dataKey="bin" tick={{ fontSize: 10, fontFamily: "var(--font-mono)" }} interval="preserveStartEnd" unit={` ${unit}`} />
+      <EvilComposedChart.YAxis tickFormatter={(value: number) => `${Math.round(value)}%`} width={36} />
+      {mb && <ReferenceLine x={mb} stroke="var(--muted-foreground)" strokeDasharray="3 3" label={{ value: "ref p50", position: "top", fill: "var(--muted-foreground)", fontSize: 10 }} />}
+      {mh && <ReferenceLine x={mh} stroke="var(--color-head-0)" strokeDasharray="3 3" label={{ value: "head p50", position: "top", fill: "var(--color-head-0)", fontSize: 10 }} />}
+      <EvilComposedChart.Bar dataKey="base" />
+      <EvilComposedChart.Bar dataKey="head" />
+    </EvilComposedChart>
+  );
+}

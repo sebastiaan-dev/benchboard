@@ -121,6 +121,7 @@ export const resolvers = {
 		runs: (repository: Repository, args: Args, { store }: Context) =>
 			store.runs({ repositoryId: repository.id, limit: args.limit, offset: args.offset }),
 		runCount: (repository: Repository, _: Args, { store }: Context) => store.runCount(repository.id),
+		profiles: (repository: Repository, args: Args, { store }: Context) => store.profilesForRepository(repository.id, Math.min(args.limit ?? 100, 1000)),
 		commit: (repository: Repository, args: Args, { store }: Context) => {
 			const exact = store.commit(repository.id, String(args.sha).toLowerCase());
 			if (exact) return exact;

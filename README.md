@@ -81,10 +81,18 @@ To put the CLI on `PATH`: `ln -s "$PWD/packages/cli/bin/benchboard.ts" ~/.local/
    benchboard open pr 1234                   # web dashboard
    ```
 
-The PR page shows head-vs-base change per series with confidence intervals, every series' relative
-change across commits, a commit × series matrix that highlights the commit introducing each step
-change, and per-series drill-downs with raw samples and provenance. Settings live in the URL, so
-links are shareable.
+The web app keeps everything one click away: a sidebar with the repository switcher, Overview, Pull
+requests, Benchmarks, Runs, Profiles and every tracked PR with its regression/improvement counts, plus
+a `⌘K` palette to jump to any PR, benchmark, run or profile.
+
+The PR page is a master–detail view: a verdict summary and geometric-mean change, a commit rail with
+step changes per commit (click to filter), and a series list where each row shows per-commit ticks,
+a trend sparkline and the head change with its 95% interval. The inspector beside it shows the
+interval against the threshold band, per-commit trend with IQR band, reference vs head sample
+distributions, measurements and provenance; when profiles exist, the differential flame graph is
+inline below. Matrix and chart views remain available. Settings live in the URL, so links are
+shareable, and `j`/`k` move through series. See [docs/design](docs/design/README.md) for the visual
+direction and its references.
 
 ## CPU profiles (samply)
 

@@ -2,11 +2,11 @@ import type { ReactNode } from "react";
 import { AlertTriangle, SearchX } from "lucide-react";
 import { Link } from "react-router";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
-import { verdictClass, verdictLabel } from "@/lib/format";
+import { verdictLabel } from "@/lib/format";
+import { Pill, verdictVar } from "@/components/kit/encodings";
 import type { Verdict } from "@/gql/graphql";
 
 export function ErrorState({ error }: { error: unknown }) {
@@ -54,8 +54,11 @@ export function EmptyState({ title, children }: { title: string; children?: Reac
 }
 
 export function VerdictBadge({ verdict, className }: { verdict: Verdict | null | undefined; className?: string }) {
-  if (!verdict) return <Badge variant="outline" className={cn("text-muted-foreground", className)}>No comparison</Badge>;
-  return <Badge variant="outline" className={cn(verdictClass[verdict], className)}>{verdictLabel[verdict]}</Badge>;
+  return (
+    <Pill color={verdict ? verdictVar[verdict] : verdictVar.NONE} className={cn("h-5 text-[11px]", className)}>
+      {verdict ? verdictLabel[verdict] : "No comparison"}
+    </Pill>
+  );
 }
 
 export function Hint({ children, content }: { children: ReactNode; content: ReactNode }) {
