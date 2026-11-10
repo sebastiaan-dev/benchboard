@@ -148,9 +148,11 @@ export const resolvers = {
 		pullRequests: (repository: Repository, _: Args, { store }: Context) => store.pullRequests(repository.id),
 		benchmarks: (repository: Repository, _: Args, { store }: Context) => store.benchmarks(repository.id),
 		runs: (repository: Repository, args: Args, { store }: Context) =>
-			store.runs({ repositoryId: repository.id, limit: args.limit, offset: args.offset }),
-		runCount: (repository: Repository, _: Args, { store }: Context) => store.runCount(repository.id),
-		profiles: (repository: Repository, args: Args, { store }: Context) => store.profilesForRepository(repository.id, Math.min(args.limit ?? 100, 1000)),
+			store.runs({ repositoryId: repository.id, limit: args.limit, offset: args.offset, search: args.search ?? undefined }),
+		runCount: (repository: Repository, args: Args, { store }: Context) => store.runCount({ repositoryId: repository.id, search: args.search ?? undefined }),
+		profiles: (repository: Repository, args: Args, { store }: Context) =>
+			store.profilesForRepository(repository.id, { limit: args.limit, offset: args.offset, search: args.search ?? undefined }),
+		profileCount: (repository: Repository, args: Args, { store }: Context) => store.profileCount(repository.id, args.search ?? undefined),
 		commit: (repository: Repository, args: Args, { store }: Context) => {
 			const exact = store.commit(repository.id, String(args.sha).toLowerCase());
 			if (exact) return exact;

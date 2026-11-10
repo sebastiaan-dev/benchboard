@@ -152,6 +152,15 @@ export function sidecarPath(file: string): string {
 	return file.replace(/\.gz$/, "").replace(/(\.json)?$/, ".json.syms.json");
 }
 
+export interface RunQuery {
+	repositoryId?: number;
+	benchmarkId?: number;
+	limit?: number;
+	offset?: number;
+	/** Run ID or title, commit SHA prefix (5+ hex characters), benchmark key, case key or label. */
+	search?: string;
+}
+
 export interface IngestInput {
 	/** Hyperfine export path, resolved against cwd. */
 	file: string;
@@ -177,7 +186,7 @@ export interface IngestResult {
 	warnings: string[];
 }
 
-type Row = Record<string, SQLQueryBindings>;
+type Row = Record<string, string | number | null>;
 
 const camel = (key: string) => key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
 function mapRow<T>(row: unknown, convert: Record<string, (value: any) => unknown> = {}): T {
@@ -580,10 +589,33 @@ export class Store {
 			WHERE m.benchmark_id = ? AND m.case_key = ? ORDER BY r.recorded_at DESC, p.id DESC LIMIT ?`)
 			.all(benchmarkId, caseKey, limit).map(toProfile);
 	}
-	profilesForRepository(repositoryId: number, limit = 100): Profile[] {
+	private profileFilter(repositoryId: number, search?: string): { where: string; params: Record<string, string | number | null> } {
+		const params: Record<string, string | number | null> = { repository: repositoryId };
+		let where = "WHERE r.repository_id = :repository";
+		const text = search?.trim().toLowerCase();
+		if (text) {
+			params.like = `%${text.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+			params.prefix = `${text.replace(/[^0-9a-f]/g, "")}%`;
+			where += ` AND (lower(b.key) LIKE :like ESCAPE '\\' OR lower(m.case_key) LIKE :like ESCAPE '\\'
+				OR lower(coalesce(p.label, '')) LIKE :like ESCAPE '\\' OR lower(coalesce(r.title, '')) LIKE :like ESCAPE '\\'
+				OR (length(:prefix) > 4 AND m.commit_sha LIKE :prefix) OR CAST(p.id AS TEXT) = :exact)`;
+			params.exact = text;
+		}
+		return { where, params };
+	}
+
+	profilesForRepository(repositoryId: number, options: { limit?: number; offset?: number; search?: string } | number = {}): Profile[] {
+		const query = typeof options === "number" ? { limit: options } : options;
+		const { where, params } = this.profileFilter(repositoryId, query.search);
 		return this.db.query(`SELECT ${PROFILE_COLUMNS.replace(/(^|,\s*)(\w)/g, "$1p.$2")} FROM profile p
-			JOIN measurement m ON m.id = p.measurement_id JOIN run r ON r.id = m.run_id
-			WHERE r.repository_id = ? ORDER BY p.recorded_at DESC, p.id DESC LIMIT ?`).all(repositoryId, limit).map(toProfile);
+			JOIN measurement m ON m.id = p.measurement_id JOIN run r ON r.id = m.run_id JOIN benchmark b ON b.id = m.benchmark_id
+			${where} ORDER BY p.recorded_at DESC, p.id DESC LIMIT :limit OFFSET :offset`)
+			.all({ ...params, limit: Math.min(Math.max(query.limit ?? 100, 1), 1000), offset: Math.max(0, query.offset ?? 0) }).map(toProfile);
+	}
+	profileCount(repositoryId: number, search?: string): number {
+		const { where, params } = this.profileFilter(repositoryId, search);
+		return (this.db.query(`SELECT count(*) AS n FROM profile p JOIN measurement m ON m.id = p.measurement_id
+			JOIN run r ON r.id = m.run_id JOIN benchmark b ON b.id = m.benchmark_id ${where}`).get(params) as { n: number }).n;
 	}
 	profileTree(id: number): CallTree {
 		const row = this.db.query("SELECT tree FROM profile WHERE id = ?").get(id) as { tree: Uint8Array } | null;
@@ -811,23 +843,36 @@ export class Store {
 		return row ? mapRow<Machine>(row) : undefined;
 	}
 
-	runs(options: { repositoryId?: number; benchmarkId?: number; limit?: number; offset?: number } = {}): Run[] {
-		const limit = Math.min(Math.max(options.limit ?? 50, 1), 500);
+	/** WHERE clause and named parameters shared by run listing and counting. */
+	private runFilter(options: RunQuery): { where: string; params: Record<string, string | number | null> } {
 		const where: string[] = [];
-		const params: SQLQueryBindings[] = [];
-		if (options.repositoryId !== undefined) { where.push("r.repository_id = ?"); params.push(options.repositoryId); }
+		const params: Record<string, string | number | null> = {};
+		if (options.repositoryId !== undefined) { where.push("r.repository_id = :repository"); params.repository = options.repositoryId; }
 		if (options.benchmarkId !== undefined) {
-			where.push("EXISTS (SELECT 1 FROM measurement m WHERE m.run_id = r.id AND m.benchmark_id = ?)");
-			params.push(options.benchmarkId);
+			where.push("EXISTS (SELECT 1 FROM measurement m WHERE m.run_id = r.id AND m.benchmark_id = :benchmark)");
+			params.benchmark = options.benchmarkId;
 		}
-		return this.db.query(`SELECT r.* FROM run r ${where.length ? "WHERE " + where.join(" AND ") : ""}
-			ORDER BY r.recorded_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, options.offset ?? 0).map(toRun);
+		const search = options.search?.trim().toLowerCase();
+		if (search) {
+			// Run ID or title, a measured commit SHA prefix, or a benchmark key, case key or case label.
+			params.like = `%${search.replace(/[\\%_]/g, (character) => `\\${character}`)}%`;
+			params.prefix = `${search.replace(/[^0-9a-f]/g, "")}%`;
+			where.push(`(lower(r.id) LIKE :like ESCAPE '\\' OR lower(coalesce(r.title, '')) LIKE :like ESCAPE '\\' OR EXISTS (
+				SELECT 1 FROM measurement m JOIN benchmark b ON b.id = m.benchmark_id WHERE m.run_id = r.id AND (
+					(length(:prefix) > 4 AND m.commit_sha LIKE :prefix) OR lower(b.key) LIKE :like ESCAPE '\\'
+					OR lower(m.case_key) LIKE :like ESCAPE '\\' OR lower(m.label) LIKE :like ESCAPE '\\')))`);
+		}
+		return { where: where.length ? `WHERE ${where.join(" AND ")}` : "", params };
 	}
-	runCount(repositoryId?: number): number {
-		const row = repositoryId === undefined
-			? this.db.query("SELECT count(*) AS n FROM run").get()
-			: this.db.query("SELECT count(*) AS n FROM run WHERE repository_id = ?").get(repositoryId);
-		return (row as { n: number }).n;
+
+	runs(options: RunQuery = {}): Run[] {
+		const { where, params } = this.runFilter(options);
+		return this.db.query(`SELECT r.* FROM run r ${where} ORDER BY r.recorded_at DESC, r.id DESC LIMIT :limit OFFSET :offset`)
+			.all({ ...params, limit: Math.min(Math.max(options.limit ?? 50, 1), 500), offset: Math.max(0, options.offset ?? 0) }).map(toRun);
+	}
+	runCount(options: RunQuery | number = {}): number {
+		const { where, params } = this.runFilter(typeof options === "number" ? { repositoryId: options } : options);
+		return (this.db.query(`SELECT count(*) AS n FROM run r ${where}`).get(params) as { n: number }).n;
 	}
 	run(id: string): Run | undefined {
 		const row = this.db.query("SELECT * FROM run WHERE id = ?").get(id);

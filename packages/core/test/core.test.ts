@@ -283,3 +283,17 @@ test("measurements recorded elsewhere keep their machine identity, with unknown 
 	const local = run([[0, [1, 1.1, 1.2]]], "2026-01-01T00:00:00Z");
 	assert.notEqual(local.run.machineId, remote.run.machineId);
 });
+
+test("run and profile listings page and search by title, SHA prefix and benchmark", () => {
+	const { store, run, shas } = prRepo(1);
+	for (let i = 0; i < 7; i++) run([[i % 2, [1, 1.1, 1.2]]], `2026-01-0${i + 1}T00:00:00Z`);
+	const repositoryId = store.repositories()[0].id;
+	assert.equal(store.runCount({ repositoryId }), 7);
+	const pages = [0, 3, 6].map((offset) => store.runs({ repositoryId, limit: 3, offset }).map((r) => r.id));
+	assert.deepEqual(pages.map((page) => page.length), [3, 3, 1]);
+	assert.equal(new Set(pages.flat()).size, 7);
+	assert.equal(store.runCount({ repositoryId, search: shas[1].slice(0, 8) }), 3);
+	assert.equal(store.runCount({ repositoryId, search: "B" }), 7, "benchmark key, case-insensitive");
+	assert.equal(store.runCount({ repositoryId, search: "50%_" }), 0, "LIKE wildcards are escaped");
+	assert.equal(store.profileCount(repositoryId), 0);
+});

@@ -26,7 +26,7 @@ const ShellQuery = graphql(`
       slug
       runCount
       benchmarks { id }
-      profiles(limit: 1000) { id }
+      profileCount
       pullRequests {
         id
         title
@@ -43,12 +43,13 @@ const ShellQuery = graphql(`
 `);
 
 const PaletteQuery = graphql(`
-  query Palette($repository: ID!) {
+  query Palette($repository: ID!, $search: String) {
     repository(id: $repository) {
       id
       benchmarks { id key title }
-      runs(limit: 40) { id title recordedAt }
-      profiles(limit: 40) { id label measurement { caseKey commitSha benchmark { key } } }
+      runs(limit: 25, search: $search) { id title recordedAt measurements { commitSha } }
+      runCount(search: $search)
+      profiles(limit: 25, search: $search) { id label measurement { caseKey commitSha benchmark { key } } }
     }
   }
 `);
@@ -108,14 +109,24 @@ function ThemeToggle() {
 
 function Palette({ open, onOpenChange, repositoryId }: { open: boolean; onOpenChange: (open: boolean) => void; repositoryId: string | null }) {
   const navigate = useNavigate();
+  const [text, setText] = useState("");
+  const [search, setSearch] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(text.trim()), 200);
+    return () => clearTimeout(timer);
+  }, [text]);
   const shell = useGraphQL(ShellQuery, {});
-  const palette = useGraphQL(PaletteQuery, { repository: repositoryId ?? "" }, { enabled: open && Boolean(repositoryId) });
+  // Runs and profiles are searched on the server, so older history is reachable too.
+  const palette = useGraphQL(PaletteQuery, { repository: repositoryId ?? "", search: search || null },
+    { enabled: open && Boolean(repositoryId), placeholderData: (previous) => previous });
+  // Server results already match; prefixing the query keeps cmdk's own filter from hiding them.
+  const serverValue = (value: string) => `${text} ${value}`;
   const repository = shell.data?.repositories.find((entry) => entry.id === repositoryId);
   const go = (to: string) => { onOpenChange(false); navigate(to); };
   return (
     <CommandDialog open={open} onOpenChange={onOpenChange} title="Jump to" description="Pull requests, benchmarks, runs and profiles" className="sm:max-w-xl">
       <Command>
-      <CommandInput placeholder="Jump to a pull request, benchmark, run or profile…" />
+      <CommandInput value={text} onValueChange={setText} placeholder="Jump to a pull request, benchmark, run (title, ID, SHA) or profile…" />
       <CommandList>
         <CommandEmpty>No matches.</CommandEmpty>
         {repository && (
@@ -143,18 +154,18 @@ function Palette({ open, onOpenChange, repositoryId }: { open: boolean; onOpenCh
               </CommandItem>
             ))}
           </CommandGroup>
-          <CommandGroup heading="Profiles">
+          <CommandGroup heading={search ? "Profiles (matching)" : "Recent profiles"}>
             {palette.data.repository.profiles.map((profile) => (
-              <CommandItem key={profile.id} value={`profile ${profile.id} ${profile.measurement.benchmark.key} ${profile.measurement.caseKey} ${profile.label ?? ""}`}
+              <CommandItem key={profile.id} value={serverValue(`profile ${profile.id} ${profile.measurement.benchmark.key} ${profile.measurement.caseKey} ${profile.label ?? ""}`)}
                 onSelect={() => go(`/profiles/${profile.id}`)}>
                 <Flame /> <span className="truncate">{seriesName(profile.measurement.benchmark.key, profile.measurement.caseKey)}</span>
                 <span className="text-muted-foreground ml-auto font-mono text-xs">{profile.measurement.commitSha?.slice(0, 7)}</span>
               </CommandItem>
             ))}
           </CommandGroup>
-          <CommandGroup heading="Recent runs">
+          <CommandGroup heading={search ? `Runs (${palette.data.repository.runCount} match${palette.data.repository.runCount > 25 ? ", first 25" : ""})` : "Recent runs"}>
             {palette.data.repository.runs.map((run) => (
-              <CommandItem key={run.id} value={`run ${run.title ?? ""} ${run.id}`} onSelect={() => go(`/runs/${run.id}`)}>
+              <CommandItem key={run.id} value={serverValue(`run ${run.title ?? ""} ${run.id} ${run.measurements.map((m) => m.commitSha ?? "").join(" ")}`)} onSelect={() => go(`/runs/${run.id}`)}>
                 <ListChecks /> <span className="truncate">{run.title ?? run.id}</span>
                 <span className="text-muted-foreground ml-auto text-xs">{relativeTime(run.recordedAt)}</span>
               </CommandItem>
@@ -198,7 +209,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     { label: "Pull requests", icon: GitPullRequest, to: `${base}/pulls`, count: repository?.pullRequests.length },
     { label: "Benchmarks", icon: Layers, to: `${base}/benchmarks`, count: repository?.benchmarks.length },
     { label: "Runs", icon: ListChecks, to: `${base}/runs`, count: repository?.runCount },
-    { label: "Profiles", icon: Flame, to: `${base}/profiles`, count: repository?.profiles.length },
+    { label: "Profiles", icon: Flame, to: `${base}/profiles`, count: repository?.profileCount },
   ];
   const active = (to: string, exact?: boolean) => exact ? location.pathname === to : location.pathname.startsWith(to);
 

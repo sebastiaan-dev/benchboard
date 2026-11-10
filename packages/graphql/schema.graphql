@@ -37,11 +37,13 @@ type Repository {
   localPath: String
   pullRequests: [PullRequest!]!
   benchmarks: [Benchmark!]!
-  runs(limit: Int = 50, offset: Int = 0): [Run!]!
-  runCount: Int!
+  "Newest first. search matches run ID or title, a commit SHA prefix (5+ hex), benchmark key, case key or label."
+  runs(limit: Int = 50, offset: Int = 0, search: String): [Run!]!
+  runCount(search: String): Int!
   commit(sha: String!): Commit
   "Profiles attached to this repository's measurements, newest first."
-  profiles(limit: Int = 100): [Profile!]!
+  profiles(limit: Int = 100, offset: Int = 0, search: String): [Profile!]!
+  profileCount(search: String): Int!
 }
 
 type Commit {

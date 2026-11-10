@@ -1,6 +1,6 @@
-import { useState } from "react";
-import { Link, useNavigate, useParams } from "react-router";
-import { Flame, GitBranch, GitCompare, GitPullRequest, Layers, ListChecks, Plus } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router";
+import { Flame, GitBranch, GitCompare, GitPullRequest, Layers, ListChecks, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { graphql } from "@/gql";
 import { Button } from "@/components/ui/button";
@@ -17,7 +17,10 @@ import { cn } from "@/lib/utils";
 import type { RepositoryPageQuery } from "@/gql/graphql";
 
 const RepositoryPageQueryDocument = graphql(`
-  query RepositoryPage($id: ID!, $runs: Int!, $profiles: Int!) {
+  query RepositoryPage(
+    $id: ID!, $pulls: Boolean!, $benchmarks: Boolean!,
+    $runs: Int!, $runOffset: Int!, $runSearch: String, $profiles: Int!, $profileOffset: Int!, $profileSearch: String
+  ) {
     repository(id: $id) {
       id
       slug
@@ -25,17 +28,20 @@ const RepositoryPageQueryDocument = graphql(`
       githubRepo
       localPath
       runCount
-      pullRequests {
+      profileCount
+      matchingRuns: runCount(search: $runSearch)
+      matchingProfiles: profileCount(search: $profileSearch)
+      pullRequests @include(if: $pulls) {
         id source githubRepo number title state headRef baseRef syncedAt updatedAt author
         commits { sha }
         report { summary { series regressions improvements unchanged inconclusive failed insufficient missingHead } series { headComparison { ratio low verdict } } }
       }
-      benchmarks {
+      benchmarks @include(if: $benchmarks) {
         id key title
         cases { caseKey count lastRecordedAt measurements(limit: 60) { id median commitSha dirty status recordedAt run { machine { id hostname } } } }
       }
-      runs(limit: $runs) { ...RunRow }
-      profiles(limit: $profiles) {
+      runs(limit: $runs, offset: $runOffset, search: $runSearch) { ...RunRow }
+      profiles(limit: $profiles, offset: $profileOffset, search: $profileSearch) {
         id label cpuMs samples symbolicatedShare recordedAt
         measurement { id caseKey commitSha dirty benchmark { id key } run { id title machine { hostname } } }
       }
@@ -50,13 +56,60 @@ const TrackMutation = graphql(`
 `);
 
 type Repository = NonNullable<RepositoryPageQuery["repository"]>;
-type PullRequest = Repository["pullRequests"][number];
+type PullRequest = NonNullable<Repository["pullRequests"]>[number];
 
-function useRepository(limits: { runs?: number; profiles?: number } = {}) {
+interface Needs {
+  pulls?: boolean;
+  benchmarks?: boolean;
+  runs?: number;
+  runOffset?: number;
+  runSearch?: string;
+  profiles?: number;
+  profileOffset?: number;
+  profileSearch?: string;
+}
+
+/** Each page requests only what it shows (@include and limits), so navigation stays cheap. */
+function useRepository(needs: Needs = {}) {
   const { id = "" } = useParams();
-  const query = useGraphQL(RepositoryPageQueryDocument, { id, runs: limits.runs ?? 10, profiles: limits.profiles ?? 8 });
+  const query = useGraphQL(RepositoryPageQueryDocument, {
+    id, pulls: needs.pulls ?? false, benchmarks: needs.benchmarks ?? false,
+    runs: needs.runs ?? 1, runOffset: needs.runOffset ?? 0, runSearch: needs.runSearch || null,
+    profiles: needs.profiles ?? 1, profileOffset: needs.profileOffset ?? 0, profileSearch: needs.profileSearch || null,
+  }, { placeholderData: (previous) => previous });
   useRepositoryScope(query.data?.repository?.id);
   return query;
+}
+
+function useDebounced<T>(value: T, delay = 250): T {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(value), delay);
+    return () => clearTimeout(timer);
+  }, [value, delay]);
+  return debounced;
+}
+
+function Pager({ offset, size, total, onChange }: { offset: number; size: number; total: number; onChange: (offset: number) => void }) {
+  if (total <= size && offset === 0) return null;
+  return (
+    <div className="text-muted-foreground flex items-center justify-between gap-3 border-t px-4 py-2.5 text-xs">
+      <span className="font-mono">{total ? `${offset + 1}–${Math.min(total, offset + size)} of ${total}` : "0 results"}</span>
+      <span className="flex gap-2">
+        <Button variant="outline" size="sm" disabled={offset === 0} onClick={() => onChange(Math.max(0, offset - size))}>Previous</Button>
+        <Button variant="outline" size="sm" disabled={offset + size >= total} onClick={() => onChange(offset + size)}>Next</Button>
+      </span>
+    </div>
+  );
+}
+
+function SearchBox({ value, onChange, placeholder }: { value: string; onChange: (value: string) => void; placeholder: string }) {
+  return (
+    <div className="relative">
+      <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
+      <Input value={value} onChange={(event) => onChange(event.target.value)} placeholder={placeholder} className="h-8 w-64 pl-8" aria-label={placeholder} />
+    </div>
+  );
 }
 
 function TrackPullRequest({ repository }: { repository: string }) {
@@ -131,7 +184,7 @@ function PullRequestRows({ pullRequests }: { pullRequests: PullRequest[] }) {
 }
 
 function BenchmarkRows({ repository, limit }: { repository: Repository; limit?: number }) {
-  const rows = repository.benchmarks.flatMap((benchmark) => benchmark.cases.map((entry) => ({ benchmark, entry })))
+  const rows = (repository.benchmarks ?? []).flatMap((benchmark) => benchmark.cases.map((entry) => ({ benchmark, entry })))
     .sort((a, b) => b.entry.lastRecordedAt.localeCompare(a.entry.lastRecordedAt)).slice(0, limit);
   if (!rows.length) return <EmptyState title="No benchmarks yet" />;
   return (
@@ -225,10 +278,12 @@ function Loaded({ query, children }: { query: ReturnType<typeof useRepository>; 
 }
 
 export function RepositoryOverviewPage() {
-  const query = useRepository({ runs: 8, profiles: 6 });
+  const query = useRepository({ pulls: true, benchmarks: true, runs: 8, profiles: 6 });
   return <Loaded query={query}>{(repository) => {
-    const attention = repository.pullRequests.filter((pr) => pr.report.summary.regressions > 0).length;
-    const seriesCount = repository.benchmarks.reduce((sum, benchmark) => sum + benchmark.cases.length, 0);
+    const pullRequests = repository.pullRequests ?? [];
+    const benchmarks = repository.benchmarks ?? [];
+    const attention = pullRequests.filter((pr) => pr.report.summary.regressions > 0).length;
+    const seriesCount = benchmarks.reduce((sum, benchmark) => sum + benchmark.cases.length, 0);
     const lastRun = repository.runs[0];
     return (
       <div className="space-y-5">
@@ -240,10 +295,10 @@ export function RepositoryOverviewPage() {
         <Panel>
           <StatStrip className="sm:grid-cols-2 xl:grid-cols-4">
             <Stat label="Runs" value={repository.runCount} detail={lastRun ? `last ${relativeTime(lastRun.recordedAt)}` : "none yet"} />
-            <Stat label="Series" value={seriesCount} detail={`${repository.benchmarks.length} benchmarks`} />
-            <Stat label="Tracked pull requests" value={repository.pullRequests.length} tone={attention ? "bad" : undefined}
+            <Stat label="Series" value={seriesCount} detail={`${benchmarks.length} benchmarks`} />
+            <Stat label="Tracked pull requests" value={pullRequests.length} tone={attention ? "bad" : undefined}
               detail={attention ? `${attention} with regressions` : "no regressions"} />
-            <Stat label="CPU profiles" value={repository.profiles.length} detail={repository.profiles[0] ? `latest ${relativeTime(repository.profiles[0].recordedAt)}` : "none yet"} />
+            <Stat label="CPU profiles" value={repository.profileCount} detail={repository.profiles[0] ? `latest ${relativeTime(repository.profiles[0].recordedAt)}` : "none yet"} />
           </StatStrip>
         </Panel>
         <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">
@@ -253,7 +308,7 @@ export function RepositoryOverviewPage() {
                 {repository.githubRepo && <TrackPullRequest repository={repository.id} />}
                 <Button variant="ghost" size="sm" asChild><Link to={`/repositories/${repository.id}/pulls`}>All</Link></Button>
               </>} />
-            <PullRequestRows pullRequests={repository.pullRequests.slice(0, 8)} />
+            <PullRequestRows pullRequests={pullRequests.slice(0, 8)} />
           </Panel>
           <Panel>
             <PanelHeader icon={Flame} title="Recent profiles" subtitle="samply flame graphs attached to measurements"
@@ -277,53 +332,88 @@ export function RepositoryOverviewPage() {
 }
 
 export function PullRequestsPage() {
-  const query = useRepository({ runs: 1, profiles: 1 });
+  const query = useRepository({ pulls: true });
   return <Loaded query={query}>{(repository) => (
     <div className="space-y-5">
       <Crumbs items={[{ label: repository.name, to: `/repositories/${repository.id}` }, { label: "Pull requests" }]} />
       <Panel>
-        <PanelHeader icon={GitPullRequest} title="Pull requests" subtitle={`${repository.pullRequests.length} tracked · measurements attach by commit`}
+        <PanelHeader icon={GitPullRequest} title="Pull requests" subtitle={`${repository.pullRequests?.length ?? 0} tracked · measurements attach by commit`}
           actions={repository.githubRepo && <TrackPullRequest repository={repository.id} />} />
-        <PullRequestRows pullRequests={repository.pullRequests} />
+        <PullRequestRows pullRequests={repository.pullRequests ?? []} />
       </Panel>
     </div>
   )}</Loaded>;
 }
 
 export function BenchmarksPage() {
-  const query = useRepository({ runs: 1, profiles: 1 });
+  const query = useRepository({ benchmarks: true });
   return <Loaded query={query}>{(repository) => (
     <div className="space-y-5">
       <Crumbs items={[{ label: repository.name, to: `/repositories/${repository.id}` }, { label: "Benchmarks" }]} />
       <Panel>
-        <PanelHeader icon={Layers} title="Benchmarks" subtitle={`${repository.benchmarks.length} benchmarks · one row per series (benchmark · case)`} />
+        <PanelHeader icon={Layers} title="Benchmarks" subtitle={`${repository.benchmarks?.length ?? 0} benchmarks · one row per series (benchmark · case)`} />
         <BenchmarkRows repository={repository} />
       </Panel>
     </div>
   )}</Loaded>;
 }
 
+const RUN_PAGE = 50;
+const PROFILE_PAGE = 100;
+
+/** Search and page offset live in the URL so result pages are linkable. */
+function useListState() {
+  const [params, setParams] = useSearchParams();
+  const [text, setText] = useState(params.get("q") ?? "");
+  const search = useDebounced(text);
+  const offset = Number(params.get("offset") ?? 0) || 0;
+  useEffect(() => {
+    setParams((current) => {
+      const next = new URLSearchParams(current);
+      if (search) next.set("q", search); else next.delete("q");
+      if ((current.get("q") ?? "") !== search) next.delete("offset");
+      return next;
+    }, { replace: true });
+  }, [search, setParams]);
+  const setOffset = (value: number) => setParams((current) => {
+    const next = new URLSearchParams(current);
+    if (value) next.set("offset", String(value)); else next.delete("offset");
+    return next;
+  }, { replace: true });
+  return { text, setText, search, offset, setOffset };
+}
+
 export function RunsPage() {
-  const query = useRepository({ runs: 200, profiles: 1 });
+  const list = useListState();
+  const query = useRepository({ runs: RUN_PAGE, runOffset: list.offset, runSearch: list.search });
   return <Loaded query={query}>{(repository) => (
     <div className="space-y-5">
       <Crumbs items={[{ label: repository.name, to: `/repositories/${repository.id}` }, { label: "Runs" }]} />
       <Panel>
-        <PanelHeader icon={ListChecks} title="Runs" subtitle={`${repository.runCount} Hyperfine runs${repository.runCount > 200 ? " · newest 200 shown" : ""}`} />
-        <div className="px-2 pb-2"><RunsTable runs={repository.runs} /></div>
+        <PanelHeader icon={ListChecks} title="Runs"
+          subtitle={list.search ? `${repository.matchingRuns} of ${repository.runCount} runs match` : `${repository.runCount} Hyperfine runs, newest first`}
+          actions={<SearchBox value={list.text} onChange={list.setText} placeholder="Title, run ID, SHA, benchmark…" />} />
+        <div className="px-2 pb-2">
+          {repository.runs.length ? <RunsTable runs={repository.runs} /> : <EmptyState title={list.search ? "No runs match" : "No runs yet"} />}
+        </div>
+        <Pager offset={list.offset} size={RUN_PAGE} total={repository.matchingRuns} onChange={list.setOffset} />
       </Panel>
     </div>
   )}</Loaded>;
 }
 
 export function ProfilesPage() {
-  const query = useRepository({ runs: 1, profiles: 500 });
+  const list = useListState();
+  const query = useRepository({ profiles: PROFILE_PAGE, profileOffset: list.offset, profileSearch: list.search });
   return <Loaded query={query}>{(repository) => (
     <div className="space-y-5">
       <Crumbs items={[{ label: repository.name, to: `/repositories/${repository.id}` }, { label: "Profiles" }]} />
       <Panel>
-        <PanelHeader icon={Flame} title="Profiles" subtitle={`${repository.profiles.length} samply profiles · select two to compare`} />
+        <PanelHeader icon={Flame} title="Profiles"
+          subtitle={`${list.search ? `${repository.matchingProfiles} of ` : ""}${repository.profileCount} samply profiles · select two to compare`}
+          actions={<SearchBox value={list.text} onChange={list.setText} placeholder="Benchmark, case, label, SHA…" />} />
         <ProfileRows repository={repository} selectable />
+        <Pager offset={list.offset} size={PROFILE_PAGE} total={repository.matchingProfiles} onChange={list.setOffset} />
       </Panel>
     </div>
   )}</Loaded>;
