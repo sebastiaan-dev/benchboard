@@ -24,7 +24,7 @@ Node 26 runs the TypeScript sources directly; only the web app has a build step.
 ## Quick start
 
 ```sh
-mise install && pnpm install
+pnpm install   # Node 26+, pnpm 12 (see package.json engines/packageManager)
 pnpm build                                  # web app → apps/web/dist
 pnpm seed:demo                              # synthetic PR in /tmp/benchboard-demo
 BENCHBOARD_HOME=/tmp/benchboard-demo pnpm benchboard serve --open
