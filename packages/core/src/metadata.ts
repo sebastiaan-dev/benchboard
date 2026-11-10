@@ -33,12 +33,13 @@ export const CaseMetadata = z.object({
 	profile: z.union([ProfileMetadata, z.array(ProfileMetadata).max(16)]).optional(),
 }).strict();
 
+/** The machine that ran the measurements; unknown fields stay "unknown" rather than being filled from the importer. */
 export const MachineMetadata = z.object({
 	hostname: z.string().min(1).max(256),
-	os: z.string().min(1).max(256),
-	arch: z.string().min(1).max(64),
-	cpu: z.string().min(1).max(256),
-	ram: z.number().int().nonnegative(),
+	os: z.string().min(1).max(256).default("unknown"),
+	arch: z.string().min(1).max(64).default("unknown"),
+	cpu: z.string().min(1).max(256).default("unknown"),
+	ram: z.number().int().nonnegative().default(0),
 }).strict();
 
 export const IngestMetadata = z.object({
@@ -59,13 +60,14 @@ export const IngestMetadata = z.object({
 	build: text.optional(),
 	/** Pull request to synchronize after ingesting: number, `owner/name#123` or URL. */
 	pullRequest: z.union([z.number().int().positive(), z.string().min(1).max(512)]).optional(),
+	/** Defaults to the importing machine; set it whenever the measurements ran elsewhere (CI, remote host, VM). */
 	machine: MachineMetadata.optional(),
 	cases: z.array(CaseMetadata).max(512).optional(),
 }).strict();
 
 export type CaseMetadata = z.infer<typeof CaseMetadata>;
-export type IngestMetadata = z.infer<typeof IngestMetadata>;
-export type MachineMetadata = z.infer<typeof MachineMetadata>;
+export type IngestMetadata = z.output<typeof IngestMetadata>;
+export type MachineMetadata = z.output<typeof MachineMetadata>;
 export type ProfileMetadata = z.infer<typeof ProfileMetadata>;
 
 export function parseMetadata(value: unknown): IngestMetadata {

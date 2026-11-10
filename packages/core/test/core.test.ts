@@ -270,3 +270,16 @@ test("the head verdict requires a head measurement, and steps across gaps are ma
 	assert.equal(point.spansGap, true);
 	assert.equal(head.points.find((entry) => entry.position === 1)!.spansGap, false);
 });
+
+test("measurements recorded elsewhere keep their machine identity, with unknown fields left unknown", () => {
+	const { store, run } = prRepo(1);
+	const file = path.join(store.home, "remote.json");
+	hyperfine(file, [{ command: "x", times: [1, 1.1, 1.2] }]);
+	const remote = store.ingest({ file, cwd: store.home, metadata: { machine: { hostname: "ci-x86", os: "linux 6.11" } } });
+	assert.deepEqual(
+		(({ hostname, os, arch, cpu, ram }) => ({ hostname, os, arch, cpu, ram }))(store.machine(remote.run.machineId)!),
+		{ hostname: "ci-x86", os: "linux 6.11", arch: "unknown", cpu: "unknown", ram: 0 },
+	);
+	const local = run([[0, [1, 1.1, 1.2]]], "2026-01-01T00:00:00Z");
+	assert.notEqual(local.run.machineId, remote.run.machineId);
+});

@@ -23,6 +23,7 @@ Usage:
       --dirty | --clean      Whether the measured build had uncommitted changes
       --pr <ref>             Also track a GitHub PR (123, owner/name#123, URL)
       --track-branch         Also track the current branch as a local PR
+      --measured-on <host>   Hostname of the machine that ran the benchmark, if not this one
       --allow-duplicate      Record an export that was already ingested
   benchboard pr track <ref>                   Track a GitHub pull request
   benchboard pr track --branch [name] [--base <ref>]
@@ -201,7 +202,7 @@ export async function main(argv: string[]): Promise<number> {
 			"include-dirty": { type: "boolean" }, limit: { type: "string" }, variables: { type: "string" },
 			port: { type: "string" }, host: { type: "string" }, open: { type: "boolean" },
 			syms: { type: "string" }, iterations: { type: "string" }, label: { type: "string" }, rate: { type: "string" },
-			metric: { type: "string" },
+			metric: { type: "string" }, "measured-on": { type: "string" },
 		},
 	});
 	const [command, ...rest] = positionals;
@@ -220,6 +221,7 @@ export async function main(argv: string[]): Promise<number> {
 					dirty: options.dirty ? true : options.clean ? false : undefined,
 				};
 				for (const [key, value] of Object.entries(overrides)) if (value !== undefined) metadata[key] = value;
+				if (options["measured-on"]) metadata.machine = { ...(metadata.machine as object | undefined), hostname: options["measured-on"] };
 				const result = store.ingest({ file: rest[0], cwd, metadata, allowDuplicate: options["allow-duplicate"] });
 				const tracked: PullRequest[] = [];
 				const pullRequest = metadata.pullRequest as string | number | undefined;
