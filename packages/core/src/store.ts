@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import type { DatabaseSync, SQLInputValue } from "node:sqlite";
+import type { Database, SQLQueryBindings } from "bun:sqlite";
 import { openDatabase } from "./db.ts";
 import { parseHyperfineExport, MAX_EXPORT_BYTES, type ExportedCase, type CaseStatus } from "./hyperfine.ts";
 import { parseMetadata, slug, type IngestMetadata, type MachineMetadata } from "./metadata.ts";
@@ -134,7 +134,7 @@ export interface IngestResult {
 	warnings: string[];
 }
 
-type Row = Record<string, SQLInputValue>;
+type Row = Record<string, SQLQueryBindings>;
 
 const camel = (key: string) => key.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase());
 function mapRow<T>(row: unknown, convert: Record<string, (value: any) => unknown> = {}): T {
@@ -210,7 +210,7 @@ function caseKeys(cases: ExportedCase[], meta: IngestMetadata, commits: (string 
 
 export class Store {
 	readonly home: string;
-	readonly db: DatabaseSync;
+	readonly db: Database;
 
 	constructor(home = defaultHome()) {
 		this.home = home;
@@ -231,13 +231,13 @@ export class Store {
 	}
 
 	transaction<T>(body: () => T): T {
-		this.db.exec("BEGIN IMMEDIATE");
+		this.db.run("BEGIN IMMEDIATE");
 		try {
 			const result = body();
-			this.db.exec("COMMIT");
+			this.db.run("COMMIT");
 			return result;
 		} catch (error) {
-			this.db.exec("ROLLBACK");
+			this.db.run("ROLLBACK");
 			throw error;
 		}
 	}
@@ -245,7 +245,7 @@ export class Store {
 	// ── Writes ────────────────────────────────────────────────────────────────
 
 	upsertRepository(identity: RepositoryIdentity): Repository {
-		this.db.prepare(`INSERT INTO repository (slug, name, remote_url, github_repo, local_path, created_at)
+		this.db.query(`INSERT INTO repository (slug, name, remote_url, github_repo, local_path, created_at)
 			VALUES (:slug, :name, :remote_url, :github_repo, :local_path, :created_at)
 			ON CONFLICT (slug) DO UPDATE SET
 				remote_url = coalesce(excluded.remote_url, remote_url),
@@ -258,7 +258,7 @@ export class Store {
 	}
 
 	upsertCommit(repositoryId: number, commit: CommitInfo) {
-		this.db.prepare(`INSERT INTO git_commit (repository_id, sha, subject, author, authored_at, committed_at, parents)
+		this.db.query(`INSERT INTO git_commit (repository_id, sha, subject, author, authored_at, committed_at, parents)
 			VALUES (:repository_id, :sha, :subject, :author, :authored_at, :committed_at, :parents)
 			ON CONFLICT (repository_id, sha) DO UPDATE SET
 				subject = coalesce(excluded.subject, subject), author = coalesce(excluded.author, author),
@@ -273,18 +273,18 @@ export class Store {
 	private upsertMachine(machine: MachineMetadata): number {
 		const fingerprint = createHash("sha256")
 			.update(JSON.stringify([machine.hostname, machine.os, machine.arch, machine.cpu, machine.ram])).digest("hex");
-		this.db.prepare(`INSERT INTO machine (fingerprint, hostname, os, arch, cpu, ram)
+		this.db.query(`INSERT INTO machine (fingerprint, hostname, os, arch, cpu, ram)
 			VALUES (:fingerprint, :hostname, :os, :arch, :cpu, :ram) ON CONFLICT (fingerprint) DO NOTHING`)
 			.run({ fingerprint, ...machine });
-		return (this.db.prepare("SELECT id FROM machine WHERE fingerprint = ?").get(fingerprint) as { id: number }).id;
+		return (this.db.query("SELECT id FROM machine WHERE fingerprint = ?").get(fingerprint) as { id: number }).id;
 	}
 
 	private upsertBenchmark(repositoryId: number, key: string, title?: string, description?: string): Benchmark {
-		this.db.prepare(`INSERT INTO benchmark (repository_id, key, title, description) VALUES (?, ?, ?, ?)
+		this.db.query(`INSERT INTO benchmark (repository_id, key, title, description) VALUES (?, ?, ?, ?)
 			ON CONFLICT (repository_id, key) DO UPDATE SET
 				title = coalesce(title, excluded.title), description = coalesce(excluded.description, description)`)
 			.run(repositoryId, key, title ?? null, description ?? null);
-		return mapRow<Benchmark>(this.db.prepare("SELECT * FROM benchmark WHERE repository_id = ? AND key = ?").get(repositoryId, key));
+		return mapRow<Benchmark>(this.db.query("SELECT * FROM benchmark WHERE repository_id = ? AND key = ?").get(repositoryId, key));
 	}
 
 	ingest(input: IngestInput): IngestResult {
@@ -298,7 +298,7 @@ export class Store {
 		}
 		if (meta.baseline !== undefined && meta.baseline > cases.length) throw new Error("Baseline is outside the exported cases.");
 		const sha256 = createHash("sha256").update(bytes).digest("hex");
-		const duplicate = this.db.prepare("SELECT id FROM run WHERE export_sha256 = ? LIMIT 1").get(sha256) as { id: string } | undefined;
+		const duplicate = this.db.query("SELECT id FROM run WHERE export_sha256 = ? LIMIT 1").get(sha256) as { id: string } | undefined;
 		if (duplicate && !input.allowDuplicate) {
 			throw new Error(`This export was already ingested as run ${duplicate.id}; pass allowDuplicate to record it again.`);
 		}
@@ -365,7 +365,7 @@ export class Store {
 			}
 			const benchmark = this.upsertBenchmark(repository.id, benchmarkKey, meta.title, meta.description);
 			const machineId = this.upsertMachine(meta.machine ?? localMachine());
-			this.db.prepare(`INSERT INTO run (id, repository_id, machine_id, recorded_at, title, conditions, environment, invocation,
+			this.db.query(`INSERT INTO run (id, repository_id, machine_id, recorded_at, title, conditions, environment, invocation,
 				warmup, notes, baseline_position, export_sha256, source_path, checkout_path, checkout_head, checkout_branch,
 				checkout_dirty, legacy_id) VALUES (:id, :repository_id, :machine_id, :recorded_at, :title, :conditions,
 				:environment, :invocation, :warmup, :notes, :baseline_position, :export_sha256, :source_path, :checkout_path,
@@ -377,7 +377,7 @@ export class Store {
 				checkout_branch: checkout?.branch ?? null, checkout_dirty: checkout?.dirty == null ? null : Number(checkout.dirty),
 				legacy_id: input.internal?.legacyId ?? null,
 			});
-			const insert = this.db.prepare(`INSERT INTO measurement (run_id, position, benchmark_id, case_key, label, command,
+			const insert = this.db.query(`INSERT INTO measurement (run_id, position, benchmark_id, case_key, label, command,
 				exported_command, commit_sha, dirty, commit_inferred, revision, build, notes, parameters, status, n, mean, stddev,
 				median, min, max, q1, q3, p95, cv, user_time, system_time, rss_median, rss_peak, times, exit_codes)
 				VALUES (:run_id, :position, :benchmark_id, :case_key, :label, :command, :exported_command, :commit_sha, :dirty,
@@ -482,12 +482,12 @@ export class Store {
 			base_sha: pr.baseSha, updated_at: pr.updatedAt, synced_at: new Date().toISOString(),
 		};
 		const existing = (pr.source === "github"
-			? this.db.prepare("SELECT id FROM pull_request WHERE source = 'github' AND github_repo = ? AND number = ?").get(pr.githubRepo, pr.number)
-			: this.db.prepare("SELECT id FROM pull_request WHERE source = 'local' AND repository_id = ? AND head_ref = ?").get(repositoryId, pr.headRef)) as { id: number } | undefined;
+			? this.db.query("SELECT id FROM pull_request WHERE source = 'github' AND github_repo = ? AND number = ?").get(pr.githubRepo, pr.number)
+			: this.db.query("SELECT id FROM pull_request WHERE source = 'local' AND repository_id = ? AND head_ref = ?").get(repositoryId, pr.headRef)) as { id: number } | undefined;
 		let id: number;
 		if (existing) {
 			id = existing.id;
-			this.db.prepare(`UPDATE pull_request SET repository_id = :repository_id, title = :title, url = :url, state = :state,
+			this.db.query(`UPDATE pull_request SET repository_id = :repository_id, title = :title, url = :url, state = :state,
 				author = :author, head_sha = :head_sha, base_ref = :base_ref, base_sha = :base_sha, updated_at = :updated_at,
 				synced_at = :synced_at WHERE id = :id`).run({
 				id, repository_id: values.repository_id, title: values.title, url: values.url, state: values.state, author: values.author,
@@ -495,14 +495,14 @@ export class Store {
 				synced_at: values.synced_at,
 			});
 		} else {
-			id = Number(this.db.prepare(`INSERT INTO pull_request (repository_id, source, github_repo, number, title, url, state,
+			id = Number(this.db.query(`INSERT INTO pull_request (repository_id, source, github_repo, number, title, url, state,
 				author, head_ref, head_sha, base_ref, base_sha, updated_at, synced_at) VALUES (:repository_id, :source, :github_repo,
 				:number, :title, :url, :state, :author, :head_ref, :head_sha, :base_ref, :base_sha, :updated_at, :synced_at)`)
 				.run(values).lastInsertRowid);
 		}
 		if (base) this.upsertCommit(repositoryId, base);
-		this.db.prepare("DELETE FROM pull_request_commit WHERE pull_request_id = ?").run(id);
-		const insert = this.db.prepare("INSERT INTO pull_request_commit (pull_request_id, position, sha) VALUES (?, ?, ?)");
+		this.db.query("DELETE FROM pull_request_commit WHERE pull_request_id = ?").run(id);
+		const insert = this.db.query("INSERT INTO pull_request_commit (pull_request_id, position, sha) VALUES (?, ?, ?)");
 		commits.forEach((commit, index) => {
 			this.upsertCommit(repositoryId, commit);
 			insert.run(id, index + 1, commit.sha);
@@ -511,24 +511,24 @@ export class Store {
 	}
 
 	deleteRun(id: string): boolean {
-		return this.db.prepare("DELETE FROM run WHERE id = ?").run(id).changes > 0;
+		return this.db.query("DELETE FROM run WHERE id = ?").run(id).changes > 0;
 	}
 
 	// ── Reads ─────────────────────────────────────────────────────────────────
 
 	repositories(): Repository[] {
-		return this.db.prepare("SELECT * FROM repository ORDER BY name, slug").all().map((row) => mapRow<Repository>(row));
+		return this.db.query("SELECT * FROM repository ORDER BY name, slug").all().map((row) => mapRow<Repository>(row));
 	}
 	repository(id: number): Repository | undefined {
-		const row = this.db.prepare("SELECT * FROM repository WHERE id = ?").get(id);
+		const row = this.db.query("SELECT * FROM repository WHERE id = ?").get(id);
 		return row ? mapRow<Repository>(row) : undefined;
 	}
 	repositoryBySlug(slugValue: string): Repository | undefined {
-		const row = this.db.prepare("SELECT * FROM repository WHERE slug = ?").get(slugValue);
+		const row = this.db.query("SELECT * FROM repository WHERE slug = ?").get(slugValue);
 		return row ? mapRow<Repository>(row) : undefined;
 	}
 	repositoryByGithub(githubRepo: string): Repository | undefined {
-		const row = this.db.prepare("SELECT * FROM repository WHERE github_repo = ? OR slug = ? LIMIT 1").get(githubRepo, `github.com/${githubRepo}`);
+		const row = this.db.query("SELECT * FROM repository WHERE github_repo = ? OR slug = ? LIMIT 1").get(githubRepo, `github.com/${githubRepo}`);
 		return row ? mapRow<Repository>(row) : undefined;
 	}
 	/** The repository a checkout belongs to, if it has been recorded. */
@@ -537,117 +537,117 @@ export class Store {
 	}
 
 	commit(repositoryId: number, sha: string): Commit | undefined {
-		const row = this.db.prepare("SELECT * FROM git_commit WHERE repository_id = ? AND sha = ?").get(repositoryId, sha);
+		const row = this.db.query("SELECT * FROM git_commit WHERE repository_id = ? AND sha = ?").get(repositoryId, sha);
 		return row ? toCommit(row) : undefined;
 	}
 	commitsByPrefix(repositoryId: number, prefix: string): Commit[] {
-		return this.db.prepare("SELECT * FROM git_commit WHERE repository_id = ? AND sha LIKE ? || '%' LIMIT 10")
+		return this.db.query("SELECT * FROM git_commit WHERE repository_id = ? AND sha LIKE ? || '%' LIMIT 10")
 			.all(repositoryId, prefix.toLowerCase().replace(/[^0-9a-f]/g, "")).map(toCommit);
 	}
 
 	pullRequests(repositoryId?: number): PullRequest[] {
 		const rows = repositoryId === undefined
-			? this.db.prepare("SELECT * FROM pull_request ORDER BY coalesce(updated_at, synced_at) DESC").all()
-			: this.db.prepare("SELECT * FROM pull_request WHERE repository_id = ? ORDER BY coalesce(updated_at, synced_at) DESC").all(repositoryId);
+			? this.db.query("SELECT * FROM pull_request ORDER BY coalesce(updated_at, synced_at) DESC").all()
+			: this.db.query("SELECT * FROM pull_request WHERE repository_id = ? ORDER BY coalesce(updated_at, synced_at) DESC").all(repositoryId);
 		return rows.map((row) => mapRow<PullRequest>(row));
 	}
 	pullRequest(id: number): PullRequest | undefined {
-		const row = this.db.prepare("SELECT * FROM pull_request WHERE id = ?").get(id);
+		const row = this.db.query("SELECT * FROM pull_request WHERE id = ?").get(id);
 		return row ? mapRow<PullRequest>(row) : undefined;
 	}
 	findPullRequest(repositoryId: number, reference: string): PullRequest | undefined {
 		const numeric = /^#?(\d+)$/.exec(reference);
 		const row = numeric
-			? this.db.prepare("SELECT * FROM pull_request WHERE repository_id = ? AND number = ? ORDER BY synced_at DESC LIMIT 1").get(repositoryId, Number(numeric[1]))
-			: this.db.prepare("SELECT * FROM pull_request WHERE repository_id = ? AND head_ref = ? ORDER BY synced_at DESC LIMIT 1").get(repositoryId, reference);
+			? this.db.query("SELECT * FROM pull_request WHERE repository_id = ? AND number = ? ORDER BY synced_at DESC LIMIT 1").get(repositoryId, Number(numeric[1]))
+			: this.db.query("SELECT * FROM pull_request WHERE repository_id = ? AND head_ref = ? ORDER BY synced_at DESC LIMIT 1").get(repositoryId, reference);
 		return row ? mapRow<PullRequest>(row) : undefined;
 	}
 	/** Ordered PR commits, excluding the base. */
 	pullRequestCommits(id: number): Commit[] {
-		return this.db.prepare(`SELECT c.* FROM pull_request_commit p
+		return this.db.query(`SELECT c.* FROM pull_request_commit p
 			JOIN pull_request pr ON pr.id = p.pull_request_id
 			JOIN git_commit c ON c.repository_id = pr.repository_id AND c.sha = p.sha
 			WHERE p.pull_request_id = ? ORDER BY p.position`).all(id).map(toCommit);
 	}
 	pullRequestsForCommit(repositoryId: number, sha: string): PullRequest[] {
-		return this.db.prepare(`SELECT DISTINCT pr.* FROM pull_request pr LEFT JOIN pull_request_commit p ON p.pull_request_id = pr.id
+		return this.db.query(`SELECT DISTINCT pr.* FROM pull_request pr LEFT JOIN pull_request_commit p ON p.pull_request_id = pr.id
 			WHERE pr.repository_id = ? AND (p.sha = ? OR pr.base_sha = ?) ORDER BY pr.synced_at DESC`)
 			.all(repositoryId, sha, sha).map((row) => mapRow<PullRequest>(row));
 	}
 
 	benchmarks(repositoryId: number): Benchmark[] {
-		return this.db.prepare("SELECT * FROM benchmark WHERE repository_id = ? ORDER BY key").all(repositoryId).map((row) => mapRow<Benchmark>(row));
+		return this.db.query("SELECT * FROM benchmark WHERE repository_id = ? ORDER BY key").all(repositoryId).map((row) => mapRow<Benchmark>(row));
 	}
 	benchmark(id: number): Benchmark | undefined {
-		const row = this.db.prepare("SELECT * FROM benchmark WHERE id = ?").get(id);
+		const row = this.db.query("SELECT * FROM benchmark WHERE id = ?").get(id);
 		return row ? mapRow<Benchmark>(row) : undefined;
 	}
 	benchmarkByKey(repositoryId: number, key: string): Benchmark | undefined {
-		const row = this.db.prepare("SELECT * FROM benchmark WHERE repository_id = ? AND key = ?").get(repositoryId, key);
+		const row = this.db.query("SELECT * FROM benchmark WHERE repository_id = ? AND key = ?").get(repositoryId, key);
 		return row ? mapRow<Benchmark>(row) : undefined;
 	}
 	benchmarkCases(benchmarkId: number): { caseKey: string; count: number; lastRecordedAt: string }[] {
-		return this.db.prepare(`SELECT m.case_key, count(*) AS count, max(r.recorded_at) AS last_recorded_at
+		return this.db.query(`SELECT m.case_key, count(*) AS count, max(r.recorded_at) AS last_recorded_at
 			FROM measurement m JOIN run r ON r.id = m.run_id WHERE m.benchmark_id = ? GROUP BY m.case_key ORDER BY m.case_key`)
 			.all(benchmarkId).map((row) => mapRow(row));
 	}
 
 	machine(id: number): Machine | undefined {
-		const row = this.db.prepare("SELECT * FROM machine WHERE id = ?").get(id);
+		const row = this.db.query("SELECT * FROM machine WHERE id = ?").get(id);
 		return row ? mapRow<Machine>(row) : undefined;
 	}
 
 	runs(options: { repositoryId?: number; benchmarkId?: number; limit?: number; offset?: number } = {}): Run[] {
 		const limit = Math.min(Math.max(options.limit ?? 50, 1), 500);
 		const where: string[] = [];
-		const params: SQLInputValue[] = [];
+		const params: SQLQueryBindings[] = [];
 		if (options.repositoryId !== undefined) { where.push("r.repository_id = ?"); params.push(options.repositoryId); }
 		if (options.benchmarkId !== undefined) {
 			where.push("EXISTS (SELECT 1 FROM measurement m WHERE m.run_id = r.id AND m.benchmark_id = ?)");
 			params.push(options.benchmarkId);
 		}
-		return this.db.prepare(`SELECT r.* FROM run r ${where.length ? "WHERE " + where.join(" AND ") : ""}
+		return this.db.query(`SELECT r.* FROM run r ${where.length ? "WHERE " + where.join(" AND ") : ""}
 			ORDER BY r.recorded_at DESC, r.id DESC LIMIT ? OFFSET ?`).all(...params, limit, options.offset ?? 0).map(toRun);
 	}
 	runCount(repositoryId?: number): number {
 		const row = repositoryId === undefined
-			? this.db.prepare("SELECT count(*) AS n FROM run").get()
-			: this.db.prepare("SELECT count(*) AS n FROM run WHERE repository_id = ?").get(repositoryId);
+			? this.db.query("SELECT count(*) AS n FROM run").get()
+			: this.db.query("SELECT count(*) AS n FROM run WHERE repository_id = ?").get(repositoryId);
 		return (row as { n: number }).n;
 	}
 	run(id: string): Run | undefined {
-		const row = this.db.prepare("SELECT * FROM run WHERE id = ?").get(id);
+		const row = this.db.query("SELECT * FROM run WHERE id = ?").get(id);
 		return row ? toRun(row) : undefined;
 	}
 	runMeasurements(runId: string): Measurement[] {
-		return this.db.prepare(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
+		return this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
 			WHERE m.run_id = ? ORDER BY m.position`).all(runId).map(toMeasurement);
 	}
 	measurement(id: number): Measurement | undefined {
-		const row = this.db.prepare(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id WHERE m.id = ?`).get(id);
+		const row = this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id WHERE m.id = ?`).get(id);
 		return row ? toMeasurement(row) : undefined;
 	}
 	measurementsForCommits(repositoryId: number, shas: string[]): Measurement[] {
 		if (!shas.length) return [];
-		return this.db.prepare(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
+		return this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
 			WHERE r.repository_id = ? AND m.commit_sha IN (SELECT value FROM json_each(?))
 			ORDER BY r.recorded_at, m.position`).all(repositoryId, JSON.stringify(shas)).map(toMeasurement);
 	}
 	seriesMeasurements(benchmarkId: number, caseKey?: string, limit = 1000): Measurement[] {
 		const rows = caseKey === undefined
-			? this.db.prepare(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
+			? this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
 				WHERE m.benchmark_id = ? ORDER BY r.recorded_at DESC, m.position LIMIT ?`).all(benchmarkId, limit)
-			: this.db.prepare(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
+			: this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
 				WHERE m.benchmark_id = ? AND m.case_key = ? ORDER BY r.recorded_at DESC, m.position LIMIT ?`).all(benchmarkId, caseKey, limit);
 		return rows.map(toMeasurement).reverse();
 	}
 
 	times(measurementId: number): number[] {
-		const row = this.db.prepare("SELECT times FROM measurement WHERE id = ?").get(measurementId) as { times: string } | undefined;
+		const row = this.db.query("SELECT times FROM measurement WHERE id = ?").get(measurementId) as { times: string } | undefined;
 		return row ? JSON.parse(row.times) : [];
 	}
 	exitCodes(measurementId: number): number[] | null {
-		const row = this.db.prepare("SELECT exit_codes FROM measurement WHERE id = ?").get(measurementId) as { exit_codes: string | null } | undefined;
+		const row = this.db.query("SELECT exit_codes FROM measurement WHERE id = ?").get(measurementId) as { exit_codes: string | null } | undefined;
 		return row?.exit_codes ? JSON.parse(row.exit_codes) : null;
 	}
 }

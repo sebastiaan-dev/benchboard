@@ -4,8 +4,13 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "bun:test";
 import { fileURLToPath } from "node:url";
+
+// node:test-style cleanup registration on top of bun:test.
+const cleanups: (() => void)[] = [];
+afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
+const t = { after: (fn: () => void) => { cleanups.push(fn); } };
 
 const bin = fileURLToPath(new URL("../bin/benchboard.ts", import.meta.url));
 
@@ -40,7 +45,7 @@ function setup(t: { after: (fn: () => void) => void }) {
 
 const series = (center: number, n = 20) => Array.from({ length: n }, (_, i) => center * (1 + ((i * 7919) % 13 - 6) / 600));
 
-test("CLI: ingest a base/head sweep, track the branch and report", (t) => {
+test("CLI: ingest a base/head sweep, track the branch and report", () => {
 	const { root, git, cli } = setup(t);
 	const exportFile = path.join(root, "bench.json");
 	fs.writeFileSync(exportFile, JSON.stringify({
@@ -80,7 +85,7 @@ test("CLI: ingest a base/head sweep, track the branch and report", (t) => {
 	assert.match(invalid.stderr, /benchmark: Use lowercase/);
 });
 
-test("CLI: serve exposes GraphQL on localhost only", async (t) => {
+test("CLI: serve exposes GraphQL on localhost only", async () => {
 	const { cli, env, repo } = setup(t);
 	assert.equal(cli("pr", "track", "--branch", "--base", "main").code, 0);
 	const port = 43000 + Math.floor(Math.random() * 1000);

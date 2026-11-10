@@ -1,7 +1,0 @@
-packages:
-  - packages/*
-  - apps/*
-minimumReleaseAgeExclude:
-  - '@graphql-tools/merge@10.0.9'
-  - '@graphql-tools/schema@11.0.9'
-  - '@graphql-tools/utils@13.2.2'

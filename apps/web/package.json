@@ -4,12 +4,12 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "pnpm codegen && vite",
-    "build": "pnpm codegen && tsc -b && vite build",
+    "dev": "bun run codegen && bunx --bun vite",
+    "build": "bun run codegen && tsc -b && bunx --bun vite build",
     "codegen": "graphql-codegen --config codegen.ts",
-    "typecheck": "pnpm codegen && tsc -b",
+    "typecheck": "bun run codegen && tsc -b",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "bunx --bun vite preview"
   },
   "dependencies": {
     "@fontsource-variable/geist": "^5.3.0",
@@ -33,7 +33,6 @@
     "@graphql-codegen/cli": "^8.0.0",
     "@graphql-codegen/client-preset": "^7.0.0",
     "@tailwindcss/vite": "^4.3.5",
-    "@types/node": "^26.0.0",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@vitejs/plugin-react": "^6.1.2",
@@ -41,6 +40,7 @@
     "tailwindcss": "^4.3.5",
     "typescript": "~7.0.2",
     "vite": "^8.3.6",
-    "shadcn": "^4.23.0"
+    "shadcn": "^4.23.0",
+    "@types/bun": "^1.4.4"
   }
 }

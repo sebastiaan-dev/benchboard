@@ -1,4 +1,4 @@
-import { DatabaseSync } from "node:sqlite";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -130,22 +130,26 @@ const MIGRATIONS: string[] = [
 	`,
 ];
 
-export function openDatabase(file: string): DatabaseSync {
+export function openDatabase(file: string): Database {
 	if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-	const db = new DatabaseSync(file, { timeout: 5000 });
-	db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA synchronous = NORMAL;");
-	const { user_version: version } = db.prepare("PRAGMA user_version").get() as { user_version: number };
+	// strict: named parameters bind from plain object keys (`:name` ↔ { name }).
+	const db = new Database(file, { create: true, strict: true });
+	db.run("PRAGMA busy_timeout = 5000");
+	db.run("PRAGMA journal_mode = WAL");
+	db.run("PRAGMA foreign_keys = ON");
+	db.run("PRAGMA synchronous = NORMAL");
+	const { user_version: version } = db.query("PRAGMA user_version").get() as { user_version: number };
 	if (version > MIGRATIONS.length) {
 		throw new Error(`Database ${file} has schema version ${version}; this benchboard supports ${MIGRATIONS.length}. Upgrade benchboard.`);
 	}
 	for (let index = version; index < MIGRATIONS.length; index++) {
-		db.exec("BEGIN IMMEDIATE");
+		db.run("BEGIN IMMEDIATE");
 		try {
-			db.exec(MIGRATIONS[index]);
-			db.exec(`PRAGMA user_version = ${index + 1}`);
-			db.exec("COMMIT");
+			db.run(MIGRATIONS[index]);
+			db.run(`PRAGMA user_version = ${index + 1}`);
+			db.run("COMMIT");
 		} catch (error) {
-			db.exec("ROLLBACK");
+			db.run("ROLLBACK");
 			throw error;
 		}
 	}

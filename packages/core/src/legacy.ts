@@ -70,7 +70,7 @@ export function inferRevision(text: string | undefined, checkout: string | null,
 export function importLegacy(store: Store, directory: string): LegacyImportResult {
 	const result: LegacyImportResult = { imported: 0, skipped: 0, failed: [] };
 	if (!fs.existsSync(directory)) return result;
-	const exists = store.db.prepare("SELECT 1 FROM run WHERE legacy_id = ?");
+	const exists = store.db.query("SELECT 1 FROM run WHERE legacy_id = ?");
 	for (const id of fs.readdirSync(directory).filter((name) => LEGACY_ID.test(name)).sort()) {
 		if (exists.get(id)) { result.skipped++; continue; }
 		try {

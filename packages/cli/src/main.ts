@@ -162,16 +162,12 @@ async function ensureServer(home: string, port: number, explicitHome: string | u
 }
 
 async function serve(store: Store, host: string, port: number, openBrowser: boolean): Promise<number> {
-	const server = createServer(store, host);
-	await new Promise<void>((resolve, reject) => {
-		server.once("error", reject);
-		server.listen(port, host, resolve);
-	});
+	const server = createServer(store, { host, port, routes: [] });
 	const url = `http://${host.includes(":") ? `[${host}]` : host === "127.0.0.1" ? "localhost" : host}:${port}`;
 	console.error(`benchboard serving ${url} (GraphQL at ${url}/graphql), data in ${store.home}`);
 	if (openBrowser) open(url);
 	await new Promise<void>((resolve) => {
-		const stop = () => server.close(() => resolve());
+		const stop = () => void server.stop().then(() => resolve());
 		process.once("SIGINT", stop);
 		process.once("SIGTERM", stop);
 	});

@@ -3,11 +3,17 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test } from "node:test";
+import { afterEach, test } from "bun:test";
+
 import {
 	Store, bootstrapRatio, inferRevision, normalizeRemote, parseHyperfineExport, pullRequestReport, random, slug, statistics,
 	verdictFor,
 } from "../src/index.ts";
+
+// node:test-style cleanup registration on top of bun:test.
+const cleanups: (() => void)[] = [];
+afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
+const t = { after: (fn: () => void) => { cleanups.push(fn); } };
 
 function temporary(t: { after: (fn: () => void) => void }, prefix: string) {
 	const directory = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
@@ -83,7 +89,7 @@ test("legacy revisions infer commits and dirty state", () => {
 	assert.deepEqual(inferRevision(undefined, null, sha, true), { sha, dirty: true });
 });
 
-test("end to end: ingest a commit sweep, track the branch and report regressions", (t) => {
+test("end to end: ingest a commit sweep, track the branch and report regressions", () => {
 	const repo = temporary(t, "benchboard-repo-");
 	const home = temporary(t, "benchboard-home-");
 	git(repo, "init", "-q", "-b", "main");
