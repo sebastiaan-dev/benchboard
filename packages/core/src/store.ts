@@ -268,10 +268,31 @@ export class Store {
 		for (const failure of failed) console.error(`benchboard: could not re-aggregate profile ${failure.id}: ${failure.error}`);
 	}
 
-	/** Incremented on every write; caches derived from stored data key on it. */
+	/** Incremented on every write; derived results are cached per version. */
 	version = 0;
+	private readonly derived = new Map<string, unknown>();
 	private changed() {
 		this.version++;
+		this.derived.clear();
+	}
+
+	private dataVersion: number | null = null;
+
+	/**
+	 * Memoizes a value derived from the stored data until the next write, through this store or any
+	 * other connection (another CLI process): SQLite's data_version changes when others commit.
+	 */
+	cached<T>(key: string, compute: () => T): T {
+		const { data_version: current } = this.db.query("PRAGMA data_version").get() as { data_version: number };
+		if (current !== this.dataVersion) {
+			this.derived.clear();
+			this.dataVersion = current;
+		}
+		if (this.derived.has(key)) return this.derived.get(key) as T;
+		const value = compute();
+		if (this.derived.size > 50_000) this.derived.clear();
+		this.derived.set(key, value);
+		return value;
 	}
 
 	close() {

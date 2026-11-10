@@ -8,9 +8,11 @@ export const ComparisonFields = graphql(`
     changePercent
     verdict
     sameRun
+    pairing
+    alternatives
     resamples
-    candidate { id run { id } }
-    baseline { id }
+    candidate { ...PointMeasurementFields commitSha }
+    baseline { ...PointMeasurementFields commitSha }
   }
 `);
 
@@ -62,7 +64,7 @@ export const PullRequestReportQuery = graphql(`
         machine { id hostname cpu os arch }
         machines { count machine { id hostname cpu } }
         commits { position isBase commit { sha shortSha subject author authoredAt url } }
-        summary { series regressions improvements unchanged inconclusive failed missingReference crossRun }
+        summary { series regressions improvements unchanged inconclusive failed insufficient missingReference missingHead crossRun }
         series {
           id
           caseKey
@@ -70,8 +72,10 @@ export const PullRequestReportQuery = graphql(`
           verdict
           referenceIsBase
           benchmark { id key title }
+          headComparison { ...ComparisonFields }
           latestComparison { ...ComparisonFields }
           reference { position }
+          head { position }
           latest { position }
           points {
             position
@@ -80,6 +84,8 @@ export const PullRequestReportQuery = graphql(`
             candidates { id }
             vsReference { ...ComparisonFields }
             vsPrevious { ...ComparisonFields }
+            previousPosition
+            spansGap
           }
         }
       }

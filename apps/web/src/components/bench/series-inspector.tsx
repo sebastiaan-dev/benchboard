@@ -5,7 +5,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { DistributionChart, TrendChart, type TrendPoint } from "@/components/bench/series-charts";
 import { VerdictBadge } from "@/components/bench/states";
 import { KeyValues, MicroLabel, Panel, PanelHeader, SectionLabel, Stat, StatStrip, Well } from "@/components/kit/panel";
-import { WideInterval, verdictVar } from "@/components/kit/encodings";
+import { Segmented, WideInterval, verdictText } from "@/components/kit/encodings";
 import { useGraphQL } from "@/lib/graphql";
 import { duration, percentFromRatio } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -13,31 +13,86 @@ import type { Statistic } from "@/gql/graphql";
 import type { Report, Series } from "@/pages/pull-request";
 import { SeriesSamplesQuery } from "@/pages/pull-request.queries";
 
-type Comparison = Series["points"][number]["vsReference"];
+type Point = Series["points"][number];
+export type Comparison = NonNullable<Point["vsReference"]>;
 
-function Change({ comparison }: { comparison: Comparison }) {
+/** What the inspector explains: the PR as a whole, or one commit's step from the previous measured commit. */
+export type Scope = { kind: "head" } | { kind: "step"; position: number };
+
+export interface ScopedComparison {
+  comparison: Comparison | null;
+  /** Human labels for the two sides. */
+  candidateLabel: string;
+  baselineLabel: string;
+  title: string;
+  note: string | null;
+}
+
+const pointLabel = (point: Point | null | undefined) => !point ? "—" : point.isBase ? "base" : `#${point.position}`;
+
+/** Resolves the scope to the single comparison whose measurements drive every figure shown. */
+export function scopedComparison(series: Series, scope: Scope): ScopedComparison {
+  const reference = series.points.find((point) => point.position === series.reference?.position);
+  if (scope.kind === "step") {
+    const point = series.points.find((entry) => entry.position === scope.position);
+    const previous = series.points.find((entry) => entry.position === point?.previousPosition);
+    if (!point?.measurement) return { comparison: null, candidateLabel: pointLabel(point), baselineLabel: "—", title: `${pointLabel(point)} step`, note: "Not measured at this commit." };
+    if (!point.vsPrevious) return { comparison: null, candidateLabel: pointLabel(point), baselineLabel: "—", title: `${pointLabel(point)} step`, note: "This is the first measured commit; there is no previous step." };
+    return {
+      comparison: point.vsPrevious, candidateLabel: pointLabel(point), baselineLabel: pointLabel(previous),
+      title: `${pointLabel(point)} vs ${pointLabel(previous)}`,
+      note: point.spansGap ? `Spans ${point.position - (point.previousPosition ?? 0) - 1} unmeasured commit(s); the change is not attributable to ${pointLabel(point)} alone.` : null,
+    };
+  }
+  const versus = series.referenceIsBase ? "base" : pointLabel(reference);
+  if (series.head) {
+    return { comparison: series.headComparison, candidateLabel: "head", baselineLabel: versus, title: `head vs ${versus}`, note: null };
+  }
+  const latest = series.points.find((point) => point.position === series.latest?.position);
+  return {
+    comparison: series.latestComparison, candidateLabel: pointLabel(latest), baselineLabel: versus,
+    title: `latest measured ${pointLabel(latest)} vs ${versus}`,
+    note: `The PR head was not measured; showing the last measured commit ${pointLabel(latest)}, which is not a head verdict.`,
+  };
+}
+
+/** Profiles for the compared measurements; falls back to other measurements at the same commits, labelled as such. */
+export function profilePairFor(series: Series, comparison: Comparison | null) {
+  if (!comparison) return null;
+  const head = comparison.candidate.profiles.at(0);
+  let base = comparison.baseline.profiles.at(0);
+  let fallback = false;
+  if (!base) {
+    const point = series.points.find((entry) => entry.measurement && entry.candidates.some((candidate) => candidate.id === comparison.baseline.id));
+    base = point?.measurement?.profiles[0];
+    fallback = Boolean(base);
+  }
+  return head && base && head.id !== base.id ? { base: base.id, head: head.id, fallback } : null;
+}
+
+function Change({ comparison }: { comparison: Point["vsReference"] }) {
   if (!comparison) return <span className="text-muted-foreground/60">—</span>;
   return (
-    <span className="font-mono tabular-nums" style={{ color: comparison.verdict === "UNCHANGED" ? undefined : verdictVar[comparison.verdict] }}
-      title={`95% CI ${percentFromRatio(comparison.low, 2)} … ${percentFromRatio(comparison.high, 2)}${comparison.sameRun ? "" : " (cross-run)"}`}>
+    <span className="font-mono tabular-nums" style={{ color: verdictText(comparison.verdict) }}
+      title={comparison.low === null ? "too few samples for an interval" : `95% CI ${percentFromRatio(comparison.low, 2)} … ${percentFromRatio(comparison.high, 2)}${comparison.sameRun ? "" : " (cross-invocation)"}`}>
       {percentFromRatio(comparison.ratio, 1)}
     </span>
   );
 }
 
-/** Persistent detail panel for one series: interval, trend, distributions, measurements, provenance. */
-export function SeriesInspector({ series, report, statistic, threshold, position, onPrevious, onNext, profilesAnchor }: {
-  series: Series; report: Report; statistic: Statistic; threshold: number;
+/** Persistent detail panel for one series and one comparison scope. */
+export function SeriesInspector({ series, report, statistic, threshold, scope, onScopeChange, position, onPrevious, onNext, profilesAnchor }: {
+  series: Series; report: Report; statistic: Statistic; threshold: number; scope: Scope; onScopeChange: (scope: Scope) => void;
   position: { index: number; total: number } | null; onPrevious?: () => void; onNext?: () => void; profilesAnchor?: string;
 }) {
-  const reference = series.points.find((point) => point.position === series.reference?.position);
-  const latest = series.points.find((point) => point.position === series.latest?.position);
-  const ids = [reference?.measurement?.id, latest?.measurement?.id].filter((id): id is string => Boolean(id));
-  const samples = useGraphQL(SeriesSamplesQuery, { ids: [...new Set(ids)] }, { enabled: ids.length > 0 });
+  const scoped = scopedComparison(series, scope);
+  const comparison = scoped.comparison;
+  const ids = comparison ? [...new Set([comparison.baseline.id, comparison.candidate.id])] : [];
+  const samples = useGraphQL(SeriesSamplesQuery, { ids }, { enabled: ids.length > 0 });
   const byId = new Map(samples.data?.measurements.map((measurement) => [measurement.id, measurement]));
   const pick = (m: { mean: number; median: number }) => statistic === "MEAN" ? m.mean : m.median;
   const columns = report.commits.map((entry) => entry.isBase ? "base" : entry.commit.shortSha.slice(0, 7));
-  const comparison = series.latestComparison;
+  const reference = series.points.find((point) => point.position === series.reference?.position);
   const trend: TrendPoint[] = series.points.map((point, index) => {
     const m = point.measurement;
     return {
@@ -45,11 +100,16 @@ export function SeriesInspector({ series, report, statistic, threshold, position
       value: m ? pick(m) : null, q1: m?.q1 ?? null, q3: m?.q3 ?? null, min: m?.min ?? null, max: m?.max ?? null, n: m?.n ?? null, dirty: m?.dirty ?? false,
     };
   });
-  const extent = Math.max(0.05, comparison ? Math.max(Math.abs(comparison.low - 1), Math.abs(comparison.high - 1)) * 1.3 : 0.05);
-  const latestDetail = latest?.measurement ? byId.get(latest.measurement.id) : undefined;
+  const extent = Math.max(0.05, comparison?.low != null && comparison.high != null
+    ? Math.max(Math.abs(comparison.low - 1), Math.abs(comparison.high - 1)) * 1.3 : comparison ? Math.abs(comparison.ratio - 1) * 1.3 : 0.05);
+  const candidateDetail = comparison ? byId.get(comparison.candidate.id) : undefined;
   const latestProfile = [...series.points].reverse().find((point) => point.measurement?.profiles.length)?.measurement?.profiles[0];
   const name = series.caseKey === "default" ? series.benchmark.key : `${series.benchmark.key} · ${series.caseKey}`;
-  const label = (point: Series["points"][number] | undefined) => point ? (point.isBase ? "base" : `#${point.position}`) : "—";
+  const steps = series.points.filter((point) => point.vsPrevious);
+  const sideStat = (label: string, m: Comparison["candidate"] | undefined) => (
+    <Stat label={label} value={m ? duration(pick(m)) : "—"} className="[&_div:nth-child(2)]:text-lg"
+      detail={m ? `n=${m.n}${m.cv !== null ? ` · cv ${(m.cv * 100).toFixed(1)}%` : ""}${m.dirty ? " · dirty" : ""}` : undefined} />
+  );
 
   return (
     <Panel>
@@ -58,7 +118,7 @@ export function SeriesInspector({ series, report, statistic, threshold, position
         title={name}
         subtitle={series.benchmark.title ?? series.label}
         actions={<>
-          <VerdictBadge verdict={series.verdict} />
+          <VerdictBadge verdict={comparison?.verdict} />
           {position && (
             <span className="text-muted-foreground flex items-center font-mono text-[11px]">
               <Button variant="ghost" size="icon" className="size-7" disabled={!onPrevious} onClick={onPrevious} aria-label="Previous series"><ChevronLeft /></Button>
@@ -69,19 +129,30 @@ export function SeriesInspector({ series, report, statistic, threshold, position
         </>}
       />
       <div className="space-y-4 px-4 pb-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <MicroLabel>Compare</MicroLabel>
+          <Segmented
+            value={scope.kind === "head" ? "head" : String(scope.position)}
+            onChange={(entry) => onScopeChange(entry === "head" ? { kind: "head" } : { kind: "step", position: Number(entry) })}
+            options={[
+              { value: "head", label: series.head ? "Head vs ref" : "Latest vs ref" },
+              ...steps.map((point) => ({ value: String(point.position), label: `${pointLabel(point)}${point.spansGap ? "*" : ""} step` })),
+            ]}
+          />
+        </div>
+
         <Well className="p-4">
-          <div className="flex items-end justify-between gap-4">
-            <div>
-              <MicroLabel>{statistic === "MEAN" ? "Mean" : "Median"} · head vs {series.referenceIsBase ? "base" : label(reference)}</MicroLabel>
-              <div className="mt-1 text-3xl font-semibold tracking-tight tabular-nums"
-                style={{ color: comparison && comparison.verdict !== "UNCHANGED" ? verdictVar[comparison.verdict] : undefined }}>
-                {comparison ? percentFromRatio(comparison.ratio, 2) : "—"}
-              </div>
-              <div className="text-muted-foreground mt-1 font-mono text-[11px]">
-                {comparison ? <>95% CI {percentFromRatio(comparison.low, 2)} … {percentFromRatio(comparison.high, 2)} · {comparison.resamples} resamples · {comparison.sameRun ? "same run" : "cross-run"}</> : "only one commit measured"}
-              </div>
-            </div>
+          <MicroLabel>{statistic === "MEAN" ? "Mean" : "Median"} · {scoped.title}</MicroLabel>
+          <div className="mt-1 text-3xl font-semibold tracking-tight tabular-nums" style={{ color: comparison ? verdictText(comparison.verdict) : undefined }}>
+            {comparison ? percentFromRatio(comparison.ratio, 2) : "—"}
           </div>
+          <div className="text-muted-foreground mt-1 font-mono text-[11px]">
+            {!comparison ? scoped.note ?? "only one commit measured"
+              : comparison.low === null ? `no interval: ${Math.min(comparison.candidate.n, comparison.baseline.n)} sample(s) on a side · descriptive only`
+                : <>95% CI {percentFromRatio(comparison.low, 2)} … {percentFromRatio(comparison.high, 2)} · {comparison.resamples} resamples</>}
+            {comparison && <> · {comparison.pairing === "SAME_INVOCATION" ? "same Hyperfine invocation" : "separate invocations"}{comparison.alternatives ? ` · ${comparison.alternatives} other measurement${comparison.alternatives > 1 ? "s" : ""} not used` : ""}</>}
+          </div>
+          {comparison && scoped.note && <p className="text-warn mt-2 text-xs">{scoped.note}</p>}
           {comparison && (
             <div className="mt-4">
               <WideInterval ratio={comparison.ratio} low={comparison.low} high={comparison.high} verdict={comparison.verdict} threshold={threshold} extent={extent} height={22} />
@@ -92,17 +163,24 @@ export function SeriesInspector({ series, report, statistic, threshold, position
           )}
         </Well>
 
-        <StatStrip className="bg-well grid-cols-2 rounded-xl border sm:grid-cols-4 [&>*]:px-3 [&>*]:py-3">
-          <Stat label={`Ref ${label(reference)}`} value={reference?.measurement ? duration(pick(reference.measurement)) : "—"} detail={reference?.measurement ? `n=${reference.measurement.n}` : undefined} className="[&_div:nth-child(2)]:text-lg" />
-          <Stat label={`Head ${label(latest)}`} value={latest?.measurement ? duration(pick(latest.measurement)) : "—"} detail={latest?.measurement ? `n=${latest.measurement.n}` : undefined} className="[&_div:nth-child(2)]:text-lg" />
-          <Stat label="CV head" value={latest?.measurement?.cv !== null && latest?.measurement?.cv !== undefined ? `${(latest.measurement.cv * 100).toFixed(1)}%` : "—"} className="[&_div:nth-child(2)]:text-lg" />
-          <Stat label="Measured" value={series.points.filter((point) => point.measurement).length} unit={`/ ${series.points.length}`} className="[&_div:nth-child(2)]:text-lg" />
-        </StatStrip>
+        {comparison && (
+          <StatStrip className="bg-well grid-cols-2 rounded-xl border sm:grid-cols-3 [&>*]:px-3 [&>*]:py-3">
+            {sideStat(`Baseline ${scoped.baselineLabel}`, comparison.baseline)}
+            {sideStat(`Candidate ${scoped.candidateLabel}`, comparison.candidate)}
+            <div className="min-w-0">
+              <MicroLabel>Compared runs</MicroLabel>
+              <div className="mt-1.5 grid gap-1 text-xs">
+                <Link to={`/runs/${comparison.baseline.run.id}`} className="hover:text-foreground text-muted-foreground truncate">base · {comparison.baseline.run.title ?? comparison.baseline.run.id}</Link>
+                <Link to={`/runs/${comparison.candidate.run.id}`} className="hover:text-foreground text-muted-foreground truncate">cand · {comparison.candidate.run.title ?? comparison.candidate.run.id}</Link>
+              </div>
+            </div>
+          </StatStrip>
+        )}
 
         {(latestProfile || profilesAnchor) && (
           <div className="flex flex-wrap items-center gap-2 rounded-xl border border-orange-500/25 bg-orange-500/[0.06] px-3 py-2">
             <Flame className="size-4 text-orange-500" />
-            <span className="text-sm">CPU profiles recorded</span>
+            <span className="text-sm">{profilesAnchor ? "Profiles for this comparison" : "CPU profiles recorded"}</span>
             <div className="ml-auto flex gap-2">
               {profilesAnchor && <Button size="sm" variant="secondary" asChild><a href={profilesAnchor}><GitCompare /> Differential flame graph</a></Button>}
               {latestProfile && <Button size="sm" variant="ghost" asChild><Link to={`/profiles/${latestProfile.id}`}><Flame /> Latest</Link></Button>}
@@ -111,18 +189,18 @@ export function SeriesInspector({ series, report, statistic, threshold, position
         )}
 
         <section className="space-y-2">
-          <SectionLabel>Per commit</SectionLabel>
+          <SectionLabel>Per commit · representative measurements</SectionLabel>
           <Well className="px-1 pt-3 pb-1">
             <TrendChart points={trend} reference={reference?.measurement ? pick(reference.measurement) : null} statistic={statistic === "MEAN" ? "Mean" : "Median"} />
           </Well>
         </section>
 
-        {reference?.measurement && latest?.measurement && reference !== latest && (
+        {comparison && comparison.baseline.id !== comparison.candidate.id && (
           <section className="space-y-2">
-            <SectionLabel>Sample distribution · {label(reference)} vs {label(latest)}</SectionLabel>
+            <SectionLabel>Sample distribution · {scoped.baselineLabel} vs {scoped.candidateLabel}</SectionLabel>
             <Well className="px-1 pt-3 pb-1">
               {samples.isPending ? <Skeleton className="h-48" /> : (
-                <DistributionChart base={byId.get(reference.measurement.id)?.times ?? []} head={byId.get(latest.measurement.id)?.times ?? []} />
+                <DistributionChart base={byId.get(comparison.baseline.id)?.times ?? []} head={byId.get(comparison.candidate.id)?.times ?? []} />
               )}
             </Well>
           </section>
@@ -133,33 +211,35 @@ export function SeriesInspector({ series, report, statistic, threshold, position
           <Well className="divide-y overflow-hidden">
             {series.points.map((point, index) => {
               const m = point.measurement;
+              const inScope = comparison && m && (m.id === comparison.candidate.id || point.candidates.some((c) => c.id === comparison.baseline.id));
               return (
-                <div key={point.position} className={cn("grid grid-cols-[4.5rem_1fr_5rem_3.5rem_3.5rem_1rem] items-center gap-2 px-3 py-1.5 text-xs", !m && "opacity-45")}>
+                <button type="button" key={point.position} disabled={!point.vsPrevious}
+                  onClick={() => onScopeChange({ kind: "step", position: point.position })}
+                  className={cn("grid w-full grid-cols-[4.5rem_1fr_5rem_3.5rem_3.5rem_1rem] items-center gap-2 px-3 py-1.5 text-left text-xs enabled:hover:bg-accent/50",
+                    !m && "opacity-45", inScope && "bg-accent/60")}>
                   <span className="font-mono">{columns[index]}{m?.dirty ? "*" : ""}</span>
-                  <span className="text-muted-foreground truncate">
-                    {m ? <Link to={`/runs/${m.run.id}`} className="hover:text-foreground">{m.run.title ?? m.run.id}</Link> : report.commits[index].commit.subject}
-                  </span>
+                  <span className="text-muted-foreground truncate">{m ? m.run.title ?? m.run.id : report.commits[index].commit.subject}</span>
                   <span className="text-right font-mono tabular-nums">{m ? duration(pick(m)) : "—"}</span>
                   <span className="text-right">{point.position === series.reference?.position ? <span className="text-muted-foreground font-mono">ref</span> : <Change comparison={point.vsReference} />}</span>
-                  <span className="text-right"><Change comparison={point.vsPrevious} /></span>
-                  {m?.profiles.length ? <Link to={`/profiles/${m.profiles[0].id}`} aria-label="Profile"><Flame className="size-3.5 text-orange-500" /></Link> : <span />}
-                </div>
+                  <span className="text-right"><Change comparison={point.vsPrevious} />{point.spansGap && <span className="text-muted-foreground">*</span>}</span>
+                  {m?.profiles.length ? <Flame className="size-3.5 text-orange-500" /> : <span />}
+                </button>
               );
             })}
           </Well>
-          <p className="text-muted-foreground font-mono text-[10.5px]">columns: value · vs reference · vs previous · * dirty build</p>
+          <p className="text-muted-foreground font-mono text-[10.5px]">value · vs reference · vs previous measured (* spans unmeasured commits) · click a row to inspect its step</p>
         </section>
 
-        {latestDetail && (
+        {candidateDetail && (
           <section className="space-y-2">
-            <SectionLabel>Provenance · head</SectionLabel>
+            <SectionLabel>Provenance · candidate {scoped.candidateLabel}</SectionLabel>
             <KeyValues rows={[
-              ["command", latestDetail.command ?? latestDetail.exportedCommand],
-              ["build", latestDetail.build],
-              ["commit", <>{latestDetail.commitSha?.slice(0, 12)}{latestDetail.commitInferred ? <span className="text-muted-foreground"> // inferred</span> : null}</>],
-              ["machine", `${latestDetail.run.machine.hostname} · ${latestDetail.run.machine.cpu}`],
-              ["conditions", latestDetail.run.conditions],
-              ["environment", latestDetail.run.environment],
+              ["command", candidateDetail.command ?? candidateDetail.exportedCommand],
+              ["build", candidateDetail.build],
+              ["commit", <>{candidateDetail.commitSha?.slice(0, 12)}{candidateDetail.commitInferred ? <span className="text-muted-foreground"> // inferred</span> : null}</>],
+              ["machine", `${candidateDetail.run.machine.hostname} · ${candidateDetail.run.machine.cpu}`],
+              ["conditions", candidateDetail.run.conditions],
+              ["environment", candidateDetail.run.environment],
             ]} />
           </section>
         )}
@@ -167,3 +247,4 @@ export function SeriesInspector({ series, report, statistic, threshold, position
     </Panel>
   );
 }
+

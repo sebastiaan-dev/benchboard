@@ -104,9 +104,11 @@ const prName = (pr: PullRequest) => pr.source === "github" ? `${pr.githubRepo}#$
 
 function verdictText(comparison: Comparison | null): string {
 	if (!comparison) return color("dim", "—");
-	const text = `${percent(comparison.ratio)} [${percent(comparison.low)}, ${percent(comparison.high)}]`;
-	const styles = { regression: "red", improvement: "green", unchanged: "dim", inconclusive: "yellow", failed: "magenta" } as const;
-	return color(styles[comparison.verdict], `${text} ${comparison.verdict}${comparison.sameRun ? "" : " (cross-run)"}`);
+	const interval = comparison.low === null || comparison.high === null ? "no interval" : `[${percent(comparison.low)}, ${percent(comparison.high)}]`;
+	const text = `${percent(comparison.ratio)} ${interval}`;
+	const styles = { regression: "red", improvement: "green", unchanged: "dim", inconclusive: "yellow", failed: "magenta", insufficient: "yellow" } as const;
+	const verdict = comparison.verdict === "insufficient" ? `insufficient data (n=${Math.min(comparison.candidate.n, comparison.baseline.n)})` : comparison.verdict;
+	return color(styles[comparison.verdict], `${text} ${verdict}${comparison.sameRun ? "" : " (cross-invocation)"}`);
 }
 
 function printReport(store: Store, report: PullRequestReport) {
@@ -120,6 +122,8 @@ function printReport(store: Store, report: PullRequestReport) {
 	const s = report.summary;
 	console.log(`${s.series} series: ${color("red", `${s.regression} regressions`)}, ${color("green", `${s.improvement} improvements`)}, ` +
 		`${s.unchanged} unchanged, ${color("yellow", `${s.inconclusive} inconclusive`)}, ${s.failed} failed` +
+		(s.insufficient ? `, ${s.insufficient} with too few samples` : "") +
+		(s.missingHead ? `; ${s.missingHead} not measured at the head` : "") +
 		(s.missingReference ? `; ${s.missingReference} without a base measurement` : ""));
 	if (!report.series.length) {
 		console.log("\nNo measurements on this PR's commits yet. Ingest Hyperfine exports with --commit set to PR commits or the base.");
@@ -129,7 +133,9 @@ function printReport(store: Store, report: PullRequestReport) {
 		const benchmark = store.benchmark(series.benchmarkId)!;
 		console.log("\n" + color("bold", `${benchmark.key}${series.caseKey === "default" ? "" : ` / ${series.caseKey}`}`) +
 			color("dim", `  ${clean(series.label).slice(0, 80)}`));
-		console.log(`  head vs ${series.referenceIsBase ? "base" : "first measured commit"}: ${verdictText(series.latestComparison)}`);
+		const versus = series.referenceIsBase ? "base" : "first measured commit";
+		if (series.head) console.log(`  head vs ${versus}: ${verdictText(series.headComparison)}`);
+		else console.log(`  head not measured; latest measured #${series.latest?.position} vs ${versus}: ${verdictText(series.latestComparison)}`);
 		for (const point of series.points) {
 			const commit = store.commit(pr.repositoryId, point.sha);
 			const label = `${point.isBase ? "base" : String(point.position).padStart(4)} ${point.sha.slice(0, 10)}`;
@@ -139,7 +145,7 @@ function printReport(store: Store, report: PullRequestReport) {
 			const value = report.statistic === "mean" ? m.mean : m.median;
 			const extra = point.candidates.length > 1 ? color("dim", ` (+${point.candidates.length - 1} more)`) : "";
 			console.log(`  ${label} ${subject} ${duration(value).padStart(11)} n=${String(m.n).padEnd(4)}${m.dirty ? " dirty" : ""}` +
-				`  Δprev ${verdictText(point.vsPrevious)}${extra}`);
+				`  Δprev ${verdictText(point.vsPrevious)}${point.spansGap ? color("dim", ` (since #${point.previousPosition})`) : ""}${extra}`);
 		}
 	}
 }

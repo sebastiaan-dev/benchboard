@@ -169,7 +169,11 @@ export const resolvers = {
 	},
 	PullRequestSource: { GITHUB: "github", LOCAL: "local" },
 	Statistic: { MEDIAN: "median", MEAN: "mean" },
-	Verdict: { REGRESSION: "regression", IMPROVEMENT: "improvement", UNCHANGED: "unchanged", INCONCLUSIVE: "inconclusive", FAILED: "failed" },
+	Verdict: {
+		REGRESSION: "regression", IMPROVEMENT: "improvement", UNCHANGED: "unchanged", INCONCLUSIVE: "inconclusive",
+		FAILED: "failed", INSUFFICIENT: "insufficient",
+	},
+	Pairing: { SAME_INVOCATION: "same-invocation", REPRESENTATIVES: "representatives" },
 	MeasurementStatus: { PASSED: "passed", FAILED: "failed", UNVERIFIED: "unverified" },
 	PullRequest: {
 		repository: (pr: PullRequest, _: Args, { store }: Context) => store.repository(pr.repositoryId),
@@ -196,7 +200,8 @@ export const resolvers = {
 		summary: (report: ReportParent) => ({
 			series: report.summary.series, regressions: report.summary.regression, improvements: report.summary.improvement,
 			unchanged: report.summary.unchanged, inconclusive: report.summary.inconclusive, failed: report.summary.failed,
-			missingReference: report.summary.missingReference, crossRun: report.summary.crossRun,
+			insufficient: report.summary.insufficient, missingReference: report.summary.missingReference,
+			missingHead: report.summary.missingHead, crossRun: report.summary.crossRun,
 		}),
 	},
 	SeriesReport: {
@@ -205,6 +210,7 @@ export const resolvers = {
 		points: (series: SeriesParent): PointParent[] => series.points.map((point) => ({ ...point, repositoryId: series.repositoryId })),
 		reference: (series: SeriesParent) => series.reference && { ...series.reference, repositoryId: series.repositoryId },
 		latest: (series: SeriesParent) => series.latest && { ...series.latest, repositoryId: series.repositoryId },
+		head: (series: SeriesParent) => series.head && { ...series.head, repositoryId: series.repositoryId },
 	},
 	ReportPoint: {
 		commit: (point: PointParent, _: Args, { store }: Context) => commitOf(store, point.repositoryId, point.sha),

@@ -28,7 +28,7 @@ const RepositoryPageQueryDocument = graphql(`
       pullRequests {
         id source githubRepo number title state headRef baseRef syncedAt updatedAt author
         commits { sha }
-        report { summary { series regressions improvements unchanged inconclusive failed } series { latestComparison { ratio verdict } } }
+        report { summary { series regressions improvements unchanged inconclusive failed insufficient missingHead } series { headComparison { ratio low verdict } } }
       }
       benchmarks {
         id key title
@@ -78,7 +78,7 @@ function TrackPullRequest({ repository }: { repository: string }) {
 }
 
 function geomean(pr: PullRequest) {
-  const ratios = pr.report.series.flatMap((series) => series.latestComparison ? [series.latestComparison.ratio] : []);
+  const ratios = pr.report.series.flatMap((series) => series.headComparison && series.headComparison.low !== null ? [series.headComparison.ratio] : []);
   return ratios.length ? Math.exp(ratios.reduce((sum, ratio) => sum + Math.log(ratio), 0) / ratios.length) : null;
 }
 

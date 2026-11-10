@@ -9,9 +9,21 @@ export const verdictVar: Record<Verdict | "NONE" | "REFERENCE", string> = {
   UNCHANGED: "color-mix(in oklch, var(--muted-foreground) 55%, transparent)",
   INCONCLUSIVE: "var(--warn)",
   FAILED: "oklch(0.68 0.17 305)",
+  INSUFFICIENT: "color-mix(in oklch, var(--muted-foreground) 40%, transparent)",
   NONE: "color-mix(in oklch, var(--muted-foreground) 18%, transparent)",
   REFERENCE: "var(--foreground)",
 };
+
+/** Text colors for verdicts; separate from fills so text can meet contrast requirements. */
+export function verdictText(verdict: Verdict | null | undefined): string | undefined {
+  switch (verdict) {
+    case "REGRESSION": return "var(--bad-fg)";
+    case "IMPROVEMENT": return "var(--good-fg)";
+    case "INCONCLUSIVE": return "var(--warn-fg)";
+    case "FAILED": return "oklch(0.55 0.2 305)";
+    default: return undefined;
+  }
+}
 
 export function StatusDot({ color, className, pulse = false }: { color: string; className?: string; pulse?: boolean }) {
   return (
@@ -102,7 +114,7 @@ export function Sparkline({ values, width = 96, height = 24, color = "var(--fore
  * threshold band ("Uplift vs control · 95% intervals").
  */
 export function IntervalGlyph({ ratio, low, high, verdict, threshold, extent, width = 140, height = 18, className }: {
-  ratio: number; low: number; high: number; verdict: Verdict; threshold: number; extent: number; width?: number; height?: number; className?: string;
+  ratio: number; low: number | null; high: number | null; verdict: Verdict; threshold: number; extent: number; width?: number; height?: number; className?: string;
 }) {
   const scale = (value: number) => width / 2 + ((value - 1) / extent) * (width / 2);
   const clamp = (value: number) => Math.max(1, Math.min(width - 1, value));
@@ -113,8 +125,9 @@ export function IntervalGlyph({ ratio, low, high, verdict, threshold, extent, wi
       <rect x={scale(1 - threshold)} width={scale(1 + threshold) - scale(1 - threshold)} y={2} height={height - 4} rx={2}
         fill="color-mix(in oklch, var(--muted-foreground) 12%, transparent)" />
       <line x1={width / 2} x2={width / 2} y1={0} y2={height} stroke="var(--muted-foreground)" strokeOpacity={0.5} />
-      <line x1={clamp(scale(low))} x2={clamp(scale(high))} y1={mid} y2={mid} stroke={color} strokeWidth={2} strokeLinecap="round" />
-      <circle cx={clamp(scale(ratio))} cy={mid} r={3.5} fill={color} stroke="var(--card)" strokeWidth={1.5} />
+      {low !== null && high !== null && <line x1={clamp(scale(low))} x2={clamp(scale(high))} y1={mid} y2={mid} stroke={color} strokeWidth={2} strokeLinecap="round" />}
+      {/* Without an interval only a hollow point is drawn: descriptive, not inferential. */}
+      <circle cx={clamp(scale(ratio))} cy={mid} r={3.5} fill={low === null ? "var(--card)" : color} stroke={low === null ? color : "var(--card)"} strokeWidth={1.5} />
     </svg>
   );
 }

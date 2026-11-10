@@ -95,6 +95,15 @@ enum Verdict {
   UNCHANGED
   INCONCLUSIVE
   FAILED
+  "Fewer than 3 samples on a side: the ratio is descriptive only, with no interval or verdict."
+  INSUFFICIENT
+}
+
+enum Pairing {
+  "The baseline was measured in the same Hyperfine invocation as the candidate (shared session; not interleaved)."
+  SAME_INVOCATION
+  "No shared invocation: each side is its commit's representative measurement."
+  REPRESENTATIVES
 }
 
 type PullRequestReport {
@@ -128,8 +137,11 @@ type ReportSummary {
   unchanged: Int!
   inconclusive: Int!
   failed: Int!
+  insufficient: Int!
   "Series whose first measurement is not at the PR base."
   missingReference: Int!
+  "Series not measured at the PR head commit (excluded from head verdicts)."
+  missingHead: Int!
   "Head comparisons whose sides come from different Hyperfine runs."
   crossRun: Int!
 }
@@ -142,8 +154,14 @@ type SeriesReport {
   points: [ReportPoint!]!
   reference: ReportPoint
   referenceIsBase: Boolean!
+  "The PR head commit's point, when this series was measured there."
+  head: ReportPoint
+  "Head vs reference; null when the head was not measured."
+  headComparison: Comparison
+  "Last measured commit, which may precede the head."
   latest: ReportPoint
   latestComparison: Comparison
+  "Verdict of headComparison."
   verdict: Verdict
 }
 
@@ -157,8 +175,13 @@ type ReportPoint {
   candidates: [Measurement!]!
   vsReference: Comparison
   vsPrevious: Comparison
+  "Position of the previous measured commit (the baseline side of vsPrevious)."
+  previousPosition: Int
+  "vsPrevious spans unmeasured commits, so the step is not attributable to this commit alone."
+  spansGap: Boolean!
 }
 
+"Every figure for a comparison (durations, distributions, provenance, profiles) comes from candidate and baseline."
 type Comparison {
   candidate: Measurement!
   baseline: Measurement!
@@ -166,12 +189,16 @@ type Comparison {
   ratio: Float!
   "Relative change in percent: (ratio - 1) * 100."
   changePercent: Float!
-  "Percentile-bootstrap 95% interval of the ratio."
-  low: Float!
-  high: Float!
+  "Percentile-bootstrap 95% interval of the ratio; null with fewer than 3 samples on a side."
+  low: Float
+  high: Float
   resamples: Int!
   verdict: Verdict!
+  "Both sides come from one Hyperfine invocation."
   sameRun: Boolean!
+  pairing: Pairing!
+  "Other eligible measurements at the two commits that were not used."
+  alternatives: Int!
 }
 
 type Benchmark {

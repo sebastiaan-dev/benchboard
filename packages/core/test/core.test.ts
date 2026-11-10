@@ -164,3 +164,109 @@ test("end to end: ingest a commit sweep, track the branch and report regressions
 	assert.ok(defaulted.measurements[0].commitInferred);
 	assert.match(defaulted.warnings[0], /checkout HEAD .* \(dirty\)/);
 });
+
+function prRepo(commits: number) {
+	const repo = temporary(t, "benchboard-pr-");
+	const home = temporary(t, "benchboard-pr-home-");
+	git(repo, "init", "-q", "-b", "main");
+	fs.writeFileSync(path.join(repo, "f"), "0");
+	git(repo, "add", "f");
+	git(repo, "commit", "-qm", "base");
+	const shas = [git(repo, "rev-parse", "HEAD")];
+	git(repo, "checkout", "-qb", "feature");
+	for (let i = 1; i <= commits; i++) {
+		fs.writeFileSync(path.join(repo, "f"), String(i));
+		git(repo, "commit", "-qam", `commit ${i}`);
+		shas.push(git(repo, "rev-parse", "HEAD"));
+	}
+	const store = new Store(home);
+	t.after(() => store.close());
+	const pr = store.syncLocalBranch({ cwd: repo, base: "main" });
+	let exports = 0;
+	/** Ingests one Hyperfine run; each case is [commit index, sample times, dirty?]. */
+	const run = (cases: [number, number[], boolean?][], recordedAt: string) => {
+		const file = path.join(home, `${++exports}.json`);
+		hyperfine(file, cases.map(([index, times]) => ({ command: `c${index}`, times })));
+		return store.ingest({
+			file, cwd: repo, allowDuplicate: true, internal: { recordedAt },
+			metadata: { benchmark: "b", cases: cases.map(([index, , dirty]) => ({ case: "q", commit: shas[index], dirty: dirty ?? false })) },
+		});
+	};
+	return { store, pr, run, shas };
+}
+
+test("comparisons use the commit's representative and report exactly the measurements compared", () => {
+	const { store, pr, run } = prRepo(1);
+	run([[0, samples(1, 20, 1)], [1, samples(2, 20, 2)]], "2026-01-01T00:00:00Z"); // older same-invocation pair
+	const newer = run([[1, samples(0.5, 20, 3)]], "2026-01-02T00:00:00Z");     // newer head on its own
+	const [series] = pullRequestReport(store, pr.id).series;
+	const comparison = series.headComparison!;
+	assert.equal(comparison.candidate.id, newer.measurements[0].id, "the newest head measurement is authoritative");
+	assert.equal(series.head!.measurement!.id, comparison.candidate.id);
+	assert.equal(comparison.pairing, "representatives");
+	assert.equal(comparison.alternatives, 1);
+	assert.ok(Math.abs(comparison.ratio - 0.5) < 0.02, String(comparison.ratio));
+	assert.equal(comparison.verdict, "improvement");
+});
+
+test("same-invocation pairing never displaces clean measurements with dirty ones", () => {
+	const { store, pr, run } = prRepo(1);
+	const clean = run([[0, samples(1, 20, 1)], [1, samples(1.5, 20, 2)]], "2026-01-01T00:00:00Z");
+	run([[0, samples(1, 20, 3), true], [1, samples(0.5, 20, 4), true]], "2026-01-02T00:00:00Z");
+	const comparison = pullRequestReport(store, pr.id, { includeDirty: true }).series[0].headComparison!;
+	assert.equal(comparison.candidate.id, clean.measurements[1].id);
+	assert.equal(comparison.baseline.id, clean.measurements[0].id);
+	assert.equal(comparison.pairing, "same-invocation");
+	assert.equal(comparison.candidate.dirty, false);
+});
+
+test("cached comparisons are invalidated by deletes, re-ingests and writes from other processes", () => {
+	const { store, pr, run, shas } = prRepo(1);
+	run([[0, samples(1, 20, 1)]], "2026-01-01T00:00:00Z");
+	const head = run([[1, samples(2, 20, 2)]], "2026-01-02T00:00:00Z");
+	assert.ok(Math.abs(pullRequestReport(store, pr.id).series[0].headComparison!.ratio - 2) < 0.05);
+	store.deleteRun(head.run.id);
+	const replacement = run([[1, samples(0.5, 20, 3)]], "2026-01-03T00:00:00Z");
+	assert.equal(replacement.measurements[0].id, head.measurements[0].id, "SQLite reuses the row ID");
+	assert.ok(Math.abs(pullRequestReport(store, pr.id).series[0].headComparison!.ratio - 0.5) < 0.02);
+	// Another connection (e.g. the CLI while the server runs) deletes the head measurement.
+	const other = new Store(store.home);
+	other.deleteRun(replacement.run.id);
+	other.close();
+	const after = pullRequestReport(store, pr.id).series[0];
+	assert.equal(after.head, null);
+	assert.equal(after.points.find((point) => point.sha === shas[1])!.measurement, null);
+});
+
+test("too few samples give a descriptive ratio without an interval or verdict", () => {
+	const { store, pr, run } = prRepo(1);
+	run([[0, [1]], [1, [2]]], "2026-01-01T00:00:00Z");
+	const comparison = pullRequestReport(store, pr.id).series[0].headComparison!;
+	assert.equal(comparison.ratio, 2);
+	assert.equal(comparison.low, null);
+	assert.equal(comparison.high, null);
+	assert.equal(comparison.verdict, "insufficient");
+	assert.equal(pullRequestReport(store, pr.id).summary.insufficient, 1);
+});
+
+test("the head verdict requires a head measurement, and steps across gaps are marked", () => {
+	const { store, pr, run } = prRepo(3);
+	run([[0, samples(1, 20, 1)], [1, samples(0.8, 20, 2)]], "2026-01-01T00:00:00Z");
+	const report = pullRequestReport(store, pr.id);
+	const [series] = report.series;
+	assert.equal(series.head, null);
+	assert.equal(series.headComparison, null);
+	assert.equal(series.verdict, null);
+	assert.equal(series.latest!.position, 1);
+	assert.equal(series.latestComparison!.verdict, "improvement");
+	assert.equal(report.summary.missingHead, 1);
+	assert.equal(report.summary.improvement, 0, "a commit before the head is not a head verdict");
+
+	run([[3, samples(0.8, 20, 3)]], "2026-01-02T00:00:00Z");
+	const head = pullRequestReport(store, pr.id).series[0];
+	const point = head.points.find((entry) => entry.position === 3)!;
+	assert.equal(head.head!.position, 3);
+	assert.equal(point.previousPosition, 1);
+	assert.equal(point.spansGap, true);
+	assert.equal(head.points.find((entry) => entry.position === 1)!.spansGap, false);
+});

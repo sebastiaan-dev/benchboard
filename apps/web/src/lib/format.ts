@@ -53,6 +53,7 @@ export const verdictLabel: Record<Verdict, string> = {
   UNCHANGED: "Unchanged",
   INCONCLUSIVE: "Inconclusive",
   FAILED: "Failed",
+  INSUFFICIENT: "Too few samples",
 };
 
 /** Semantic colors shared by charts and badges (light, dark). */
@@ -62,6 +63,7 @@ export const verdictColor: Record<Verdict | "NONE", { light: string; dark: strin
   UNCHANGED: { light: "#737373", dark: "#a3a3a3" },
   INCONCLUSIVE: { light: "#d97706", dark: "#fbbf24" },
   FAILED: { light: "#9333ea", dark: "#c084fc" },
+  INSUFFICIENT: { light: "#a3a3a3", dark: "#737373" },
   NONE: { light: "#d4d4d4", dark: "#404040" },
 };
 
@@ -71,6 +73,7 @@ export const verdictClass: Record<Verdict, string> = {
   UNCHANGED: "bg-neutral-500/10 text-neutral-600 dark:text-neutral-300 border-neutral-500/25",
   INCONCLUSIVE: "bg-amber-500/12 text-amber-700 dark:text-amber-300 border-amber-500/30",
   FAILED: "bg-purple-500/12 text-purple-700 dark:text-purple-300 border-purple-500/30",
+  INSUFFICIENT: "bg-neutral-500/10 text-neutral-600 dark:text-neutral-300 border-neutral-500/25",
 };
 
 /** Diverging cell background for a relative change, saturating at ±maxChange. */
@@ -78,7 +81,7 @@ export function changeBackground(ratio: number, verdict: Verdict | null, maxChan
   if (verdict === "FAILED") return "rgb(147 51 234 / 0.25)";
   const change = Math.max(-1, Math.min(1, (ratio - 1) / maxChange));
   const strength = Math.abs(change) ** 0.7;
-  const muted = verdict === "UNCHANGED" || verdict === "INCONCLUSIVE";
+  const muted = verdict === "UNCHANGED" || verdict === "INCONCLUSIVE" || verdict === "INSUFFICIENT";
   const alpha = (muted ? 0.08 : 0.15) + strength * (muted ? 0.15 : 0.55);
   return change >= 0 ? `rgb(220 38 38 / ${alpha.toFixed(3)})` : `rgb(5 150 105 / ${alpha.toFixed(3)})`;
 }

@@ -6,8 +6,8 @@ import type { Verdict } from "@/gql/graphql";
 
 export interface MatrixComparison {
   ratio: number;
-  low: number;
-  high: number;
+  low: number | null;
+  high: number | null;
   verdict: Verdict;
   sameRun: boolean;
 }
@@ -20,6 +20,7 @@ export interface MatrixCell {
   vsPrevious: MatrixComparison | null;
   extra: number;
   profiled: boolean;
+  spansGap: boolean;
 }
 
 export interface MatrixRow {
@@ -42,8 +43,8 @@ function ComparisonLine({ title, comparison }: { title: string; comparison: Matr
     <div className="flex justify-between gap-4">
       <span className="opacity-70">{title}</span>
       <span className="font-mono tabular-nums">
-        {percentFromRatio(comparison.ratio, 2)} [{percentFromRatio(comparison.low, 1)}, {percentFromRatio(comparison.high, 1)}] {verdictLabel[comparison.verdict].toLowerCase()}
-        {comparison.sameRun ? "" : " ·cross-run"}
+        {percentFromRatio(comparison.ratio, 2)} {comparison.low === null ? "(no interval)" : `[${percentFromRatio(comparison.low, 1)}, ${percentFromRatio(comparison.high, 1)}]`} {verdictLabel[comparison.verdict].toLowerCase()}
+        {comparison.sameRun ? "" : " · cross-invocation"}
       </span>
     </div>
   );
@@ -60,7 +61,8 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
     let regressions = 0;
     let improvements = 0;
     for (const row of rows) {
-      const verdict = row.cells[column].vsPrevious?.verdict;
+      const cell = row.cells[column];
+      const verdict = cell.spansGap ? undefined : cell.vsPrevious?.verdict;
       if (verdict === "REGRESSION") regressions++;
       if (verdict === "IMPROVEMENT") improvements++;
     }
@@ -113,7 +115,7 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
               </td>
               {row.cells.map((cell, index) => {
                 const column = columns[index];
-                const step = cell.vsPrevious?.verdict;
+                const step = cell.spansGap ? undefined : cell.vsPrevious?.verdict;
                 const content = cell.value === null ? (
                   <span className="text-muted-foreground/40">·</span>
                 ) : cell.isReference ? (

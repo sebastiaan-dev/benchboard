@@ -11,11 +11,11 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { CommitMatrix, type MatrixColumn, type MatrixRow } from "@/components/bench/commit-matrix";
 import { TimelineChart } from "@/components/bench/timeline-chart";
 import { ProfileDiffView } from "@/components/bench/profile-diff";
-import { SeriesInspector } from "@/components/bench/series-inspector";
+import { SeriesInspector, profilePairFor, scopedComparison, type Scope } from "@/components/bench/series-inspector";
 import { EmptyState, ErrorState, LoadingState, NotFound } from "@/components/bench/states";
 import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { MicroLabel, Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
-import { IntervalGlyph, Pill, SegmentedBar, Segmented, Sparkline, Ticks, verdictVar, type Tick } from "@/components/kit/encodings";
+import { IntervalGlyph, Pill, SegmentedBar, Segmented, Sparkline, Ticks, verdictText, verdictVar, type Tick } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
 import { percentFromRatio, relativeTime, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -39,14 +39,15 @@ export function seriesTicks(series: Series, columns: { position: number; label: 
     return {
       key: point.position,
       color: !point.measurement ? verdictVar.NONE : isReference ? "color-mix(in oklch, var(--foreground) 45%, transparent)" : verdict ? verdictVar[verdict] : verdictVar.NONE,
-      emphasis: point.vsPrevious?.verdict === "REGRESSION" || point.vsPrevious?.verdict === "IMPROVEMENT",
+      // A step is attributed to this commit only when the previous commit was measured too.
+      emphasis: !point.spansGap && (point.vsPrevious?.verdict === "REGRESSION" || point.vsPrevious?.verdict === "IMPROVEMENT"),
       label: (
         <div className="grid gap-0.5">
           <span className="font-mono">{columns[index].label}{point.measurement?.dirty ? " +dirty" : ""}</span>
           <span className="opacity-70">{columns[index].subject}</span>
           <span>{!point.measurement ? "not measured" : isReference ? "reference" : point.vsReference
             ? `${percentFromRatio(point.vsReference.ratio, 1)} vs reference · ${verdictLabel[point.vsReference.verdict].toLowerCase()}` : "measured"}</span>
-          {point.vsPrevious && <span className="opacity-70">step {percentFromRatio(point.vsPrevious.ratio, 1)}</span>}
+          {point.vsPrevious && <span className="opacity-70">step {percentFromRatio(point.vsPrevious.ratio, 1)} since #{point.previousPosition}{point.spansGap ? " (spans unmeasured commits)" : ""}</span>}
         </div>
       ),
     };
@@ -57,7 +58,7 @@ function SeriesRow({ series, columns, statistic, threshold, extent, selected, on
   series: Series; columns: { position: number; label: string; subject: string }[]; statistic: Statistic; threshold: number;
   extent: number; selected: boolean; onSelect: () => void;
 }) {
-  const comparison = series.latestComparison;
+  const comparison = series.headComparison;
   const values = series.points.map((point) => point.measurement ? value(statistic, point.measurement) : null);
   const reference = series.points.find((point) => point.position === series.reference?.position)?.measurement;
   const profiled = series.points.some((point) => point.measurement?.profiles.length);
@@ -78,10 +79,11 @@ function SeriesRow({ series, columns, statistic, threshold, extent, selected, on
       <span className="hidden @2xl:block"><Sparkline values={values} reference={reference ? value(statistic, reference) : undefined} color={color} width={88} height={22} /></span>
       <span className="hidden @lg:block">
         {comparison ? <IntervalGlyph ratio={comparison.ratio} low={comparison.low} high={comparison.high} verdict={comparison.verdict} threshold={threshold} extent={extent} width={112} />
-          : <span className="text-muted-foreground font-mono text-[11px]">single commit</span>}
+          : <span className="text-muted-foreground font-mono text-[11px]">{series.head ? "single commit" : "head not measured"}</span>}
       </span>
-      <span className="text-right font-mono text-sm font-medium tabular-nums" style={{ color }}>
-        {comparison ? percentFromRatio(comparison.ratio, 1) : "—"}
+      <span className="text-right font-mono text-sm font-medium tabular-nums" style={{ color: comparison ? verdictText(comparison.verdict) : undefined }}>
+        {comparison ? percentFromRatio(comparison.ratio, 1)
+          : series.latestComparison ? <span className="text-muted-foreground text-xs font-normal" title={`latest measured #${series.latest?.position}, not the head`}>({percentFromRatio(series.latestComparison.ratio, 0)})</span> : "—"}
       </span>
       {profiled ? <Flame className="size-3.5 text-orange-500" /> : <span />}
     </button>
@@ -134,7 +136,7 @@ export function PullRequestPage() {
     }).sort((a, b) => {
       // Regressions first, then by magnitude of change.
       const rank = (v: Verdict | null) => v === "REGRESSION" ? 0 : v === "FAILED" ? 1 : v === "INCONCLUSIVE" ? 2 : v === "IMPROVEMENT" ? 3 : 4;
-      return rank(a.verdict) - rank(b.verdict) || Math.abs((b.latestComparison?.ratio ?? 1) - 1) - Math.abs((a.latestComparison?.ratio ?? 1) - 1);
+      return rank(a.verdict) - rank(b.verdict) || Math.abs((b.headComparison?.ratio ?? 1) - 1) - Math.abs((a.headComparison?.ratio ?? 1) - 1);
     });
   }, [report, filter, search, commitFilter]);
 
@@ -158,25 +160,36 @@ export function PullRequestPage() {
   if (!pr || !report) return <NotFound what="pull request" />;
 
   const s = report.summary;
-  const compared = report.series.filter((series) => series.latestComparison);
-  const geomean = compared.length ? Math.exp(compared.reduce((sum, series) => sum + Math.log(series.latestComparison!.ratio), 0) / compared.length) : null;
-  const extent = Math.max(0.05, ...compared.flatMap((series) => [Math.abs(series.latestComparison!.low - 1), Math.abs(series.latestComparison!.high - 1)]));
+  // Headline figures use only series measured at the head with an interval-backed comparison.
+  const compared = report.series.filter((series) => series.headComparison && series.headComparison.low !== null);
+  const geomean = compared.length ? Math.exp(compared.reduce((sum, series) => sum + Math.log(series.headComparison!.ratio), 0) / compared.length) : null;
+  const extent = Math.max(0.05, ...report.series.flatMap((series) => {
+    const c = series.headComparison;
+    return c ? [Math.abs((c.low ?? c.ratio) - 1), Math.abs((c.high ?? c.ratio) - 1)] : [];
+  }));
   const measuredCommits = report.commits.filter((commit) => report.series.some((series) => series.points.find((point) => point.position === commit.position)?.measurement));
   const profiles = report.series.reduce((sum, series) => sum + series.points.reduce((n, point) => n + (point.measurement?.profiles.length ?? 0), 0), 0);
   const steps = columns.map((column) => {
-    let up = 0, down = 0;
+    let up = 0, down = 0, gap = 0;
     for (const series of report.series) {
-      const verdict = series.points.find((point) => point.position === column.position)?.vsPrevious?.verdict;
-      if (verdict === "REGRESSION") up++;
-      if (verdict === "IMPROVEMENT") down++;
+      const point = series.points.find((entry) => entry.position === column.position);
+      const verdict = point?.vsPrevious?.verdict;
+      if (verdict !== "REGRESSION" && verdict !== "IMPROVEMENT") continue;
+      // Steps across unmeasured commits are shown separately: they are not attributable to this commit.
+      if (point!.spansGap) gap++;
+      else if (verdict === "REGRESSION") up++;
+      else down++;
     }
-    return { up, down };
+    return { up, down, gap };
   });
   const prCommits = report.commits.filter((entry) => !entry.isBase).length;
 
-  // Profile pair for the selected series: the measured profiles nearest the reference and the head.
-  const profiled = selected?.points.filter((point) => point.measurement?.profiles.length) ?? [];
-  const profilePair = profiled.length >= 2 ? [profiled[0].measurement!.profiles[0].id, profiled.at(-1)!.measurement!.profiles[0].id] as const : null;
+  // The inspector explains one comparison: head vs reference, or a commit's step (defaults to the selected commit).
+  const scopeParam = params.get("scope");
+  const scope: Scope = scopeParam && scopeParam !== "head" ? { kind: "step", position: Number(scopeParam) }
+    : !scopeParam && commitFilter !== null ? { kind: "step", position: Number(commitFilter) } : { kind: "head" };
+  const scoped = selected ? scopedComparison(selected, scope) : null;
+  const profilePair = selected && scoped ? profilePairFor(selected, scoped.comparison) : null;
 
   return (
     <div className="space-y-5">
@@ -247,12 +260,15 @@ export function PullRequestPage() {
               <MicroLabel>Head vs {s.missingReference === s.series ? "first measurement" : "base"} · {s.series} series</MicroLabel>
               <span className="text-muted-foreground font-mono text-[11px]">±{(threshold * 100).toFixed(1)}% · 95% CI</span>
             </div>
-            <SegmentedBar legend={false} segments={(["REGRESSION", "INCONCLUSIVE", "UNCHANGED", "IMPROVEMENT", "FAILED"] as const).map((verdict) => ({
-              key: verdict, label: verdictLabel[verdict], color: verdictVar[verdict],
-              value: verdict === "REGRESSION" ? s.regressions : verdict === "IMPROVEMENT" ? s.improvements : verdict === "UNCHANGED" ? s.unchanged : verdict === "INCONCLUSIVE" ? s.inconclusive : s.failed,
+            <SegmentedBar legend={false} segments={(["REGRESSION", "INCONCLUSIVE", "UNCHANGED", "IMPROVEMENT", "FAILED", "INSUFFICIENT", "NONE"] as const).map((verdict) => ({
+              key: verdict, label: verdict === "NONE" ? "Head not measured" : verdictLabel[verdict], color: verdictVar[verdict],
+              value: { REGRESSION: s.regressions, IMPROVEMENT: s.improvements, UNCHANGED: s.unchanged, INCONCLUSIVE: s.inconclusive,
+                FAILED: s.failed, INSUFFICIENT: s.insufficient, NONE: s.missingHead }[verdict],
             }))} />
             <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1">
-              {([["regressions", "REGRESSION", s.regressions], ["improvements", "IMPROVEMENT", s.improvements], ["unchanged", "UNCHANGED", s.unchanged], ["inconclusive", "INCONCLUSIVE", s.inconclusive]] as const).map(([key, verdict, count]) => (
+              {([["regressions", "REGRESSION", s.regressions], ["improvements", "IMPROVEMENT", s.improvements], ["unchanged", "UNCHANGED", s.unchanged],
+                ["inconclusive", "INCONCLUSIVE", s.inconclusive], ["too few samples", "INSUFFICIENT", s.insufficient], ["head not measured", "NONE", s.missingHead]] as const)
+                .filter(([key, , count]) => count > 0 || key === "regressions" || key === "improvements").map(([key, verdict, count]) => (
                 <button key={key} type="button" onClick={() => update({ filter: filter === key ? null : key === "unchanged" || key === "inconclusive" ? null : key })}
                   className="flex items-center gap-1.5 text-sm">
                   <span className="size-2 rounded-full" style={{ background: verdictVar[verdict] }} />
@@ -264,10 +280,10 @@ export function PullRequestPage() {
           </div>
           <Stat label="Geometric mean change" value={geomean === null ? "—" : percentFromRatio(geomean, 1)}
             tone={geomean === null ? undefined : geomean > 1 + threshold ? "bad" : geomean < 1 - threshold ? "good" : undefined}
-            detail={`${compared.length} compared${s.crossRun ? ` · ${s.crossRun} cross-run` : ""}`} />
+            detail={`${compared.length} of ${s.series} with head intervals${s.crossRun ? ` · ${s.crossRun} cross-invocation` : ""}`} />
           <div>
             <Stat label="Commits measured" value={measuredCommits.length} unit={`/ ${report.commits.length}`}
-              detail={s.missingReference ? `${s.missingReference} series lack a base` : "base included"} />
+              detail={[s.missingReference ? `${s.missingReference} lack a base` : "base included", s.missingHead ? `${s.missingHead} lack the head` : null].filter(Boolean).join(" · ")} />
             <Ticks className="mt-2" size="sm" ticks={report.commits.map((commit) => ({
               key: commit.position,
               color: measuredCommits.includes(commit) ? "var(--foreground)" : verdictVar.NONE,
@@ -294,7 +310,7 @@ export function PullRequestPage() {
                 <Tooltip key={column.position}>
                   <TooltipTrigger asChild>
                     <button type="button" onClick={() => update({ commit: active ? null : String(column.position), filter: null })}
-                      disabled={!step.up && !step.down}
+                      disabled={!step.up && !step.down && !step.gap}
                       className={cn("bg-well grid min-w-28 flex-1 gap-1 rounded-xl border px-3 py-2 text-left transition-colors enabled:hover:border-foreground/25 disabled:opacity-70",
                         active && "border-foreground/40 bg-accent")}>
                       <span className="text-muted-foreground font-mono text-[10px] tracking-wide uppercase">{column.isBase ? "base" : `#${column.position}`}</span>
@@ -302,7 +318,8 @@ export function PullRequestPage() {
                       <span className="flex h-4 items-center gap-2 font-mono text-[11px]">
                         {step.up > 0 && <span className="text-bad">▲ {step.up}</span>}
                         {step.down > 0 && <span className="text-good">▼ {step.down}</span>}
-                        {!step.up && !step.down && <span className="text-muted-foreground/50">·</span>}
+                        {step.gap > 0 && <span className="text-muted-foreground" title="changes across unmeasured commits">≈ {step.gap}</span>}
+                        {!step.up && !step.down && !step.gap && <span className="text-muted-foreground/50">·</span>}
                       </span>
                     </button>
                   </TooltipTrigger>
@@ -360,6 +377,7 @@ export function PullRequestPage() {
                       value: point.measurement ? value(statistic, point.measurement) : null, dirty: point.measurement?.dirty ?? false,
                       isReference: series.reference?.position === point.position, vsReference: point.vsReference, vsPrevious: point.vsPrevious,
                       extra: Math.max(0, point.candidates.length - 1), profiled: (point.measurement?.profiles.length ?? 0) > 0,
+                      spansGap: point.spansGap,
                     })),
                   }))}
                   onSelect={(series) => update({ series })}
@@ -386,6 +404,8 @@ export function PullRequestPage() {
                 position={selectedIndex >= 0 ? { index: selectedIndex, total: visible.length } : null}
                 onPrevious={selectedIndex > 0 ? () => update({ series: visible[selectedIndex - 1].id }) : undefined}
                 onNext={selectedIndex >= 0 && selectedIndex < visible.length - 1 ? () => update({ series: visible[selectedIndex + 1].id }) : undefined}
+                scope={scope}
+                onScopeChange={(next) => update({ scope: next.kind === "head" ? (commitFilter !== null ? "head" : null) : String(next.position) })}
                 profilesAnchor={profilePair ? "#profile-diff" : undefined}
               />
             ) : <EmptyState title="Select a series" />}
@@ -393,8 +413,9 @@ export function PullRequestPage() {
         </div>
 
         {selected && profilePair && (
-          <div id="profile-diff" className="scroll-mt-16">
-            <ProfileDiffView key={profilePair.join(":")} baseId={profilePair[0]} headId={profilePair[1]} inline />
+          <div id="profile-diff" className="scroll-mt-16 space-y-2">
+            {profilePair.fallback && <p className="text-muted-foreground text-xs">The compared baseline has no profile; using another profiled measurement at the same commit.</p>}
+            <ProfileDiffView key={`${profilePair.base}:${profilePair.head}`} baseId={profilePair.base} headId={profilePair.head} inline />
           </div>
         )}
       </>}
