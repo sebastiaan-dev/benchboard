@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { childrenOf, functionLibrary, functionName, isThread, totals, type CallTree, type DiffTree, type Metric } from "@benchboard/core/profile-tree";
 import { cn } from "@/lib/utils";
 
@@ -160,7 +160,9 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
   const [width, setWidth] = useState(0);
   const [focus, setFocus] = useState<FlameNode>(root);
   const [hover, setHover] = useState<{ node: FlameNode; x: number; y: number } | null>(null);
-  useEffect(() => setFocus(root), [root]);
+  // Keyboard cursor: arrows move between frames, Enter zooms, Escape zooms out.
+  const [cursor, setCursor] = useState<FlameNode | null>(null);
+  useEffect(() => { setFocus(root); setCursor(null); }, [root]);
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -196,13 +198,39 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
     const id = (event.target as HTMLElement).closest<HTMLElement>("[data-node]")?.dataset.node;
     return id === undefined ? undefined : byId.get(Number(id));
   };
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const current = cursor ?? focus;
+    const visible = (node: FlameNode | null | undefined) => node && (byId.has(node.id) || node === focus) ? node : null;
+    let next: FlameNode | null = null;
+    const siblings = current.parent?.children.filter((node) => byId.has(node.id)) ?? [];
+    switch (event.key) {
+      case "ArrowUp": next = current.parent; break;
+      case "ArrowDown": next = visible(current.children.find((node) => byId.has(node.id))); break;
+      case "ArrowLeft": next = siblings[siblings.indexOf(current) - 1] ?? null; break;
+      case "ArrowRight": next = siblings[siblings.indexOf(current) + 1] ?? null; break;
+      case "Enter": case " ": setFocus(current); event.preventDefault(); return;
+      case "Escape": if (focus.parent) { setFocus(focus.parent); setCursor(focus.parent); event.preventDefault(); } return;
+      default: return;
+    }
+    event.preventDefault();
+    if (next) setCursor(next);
+  };
   const ms = (value: number | undefined) => value === undefined ? "—" : Math.abs(value) >= 1000 ? `${(value / 1000).toFixed(2)} s` : `${value.toFixed(Math.abs(value) >= 10 ? 1 : 2)} ms`;
   const pct = (value: number) => `${(total ? (value / total) * 100 : 0).toFixed(2)}%`;
   const crumbs: FlameNode[] = [];
   for (let node: FlameNode | null = focus; node; node = node.parent) crumbs.unshift(node);
 
+  const describedNode = cursor ?? hover?.node ?? null;
+  const describedBy = `flame-${root.id}-${root.name.length}-description`;
+  const description = describedNode ? (diff && describedNode.base !== undefined
+    ? `${describedNode.name}${describedNode.library ? ` in ${describedNode.library}` : ""}: base ${ms(describedNode.base)}, head ${ms(describedNode.head)}, change ${ms((describedNode.head ?? 0) - describedNode.base)}.`
+    : `${describedNode.name}${describedNode.library ? ` in ${describedNode.library}` : ""}: total ${ms(describedNode.value)} (${pct(describedNode.value)}), self ${ms(describedNode.self)}.`)
+    : `Showing ${focus.name}: ${ms(focus.value)}.`;
+
   return (
     <div className={cn("space-y-2", className)}>
+      {/* Text equivalent of the hovered or keyboard-selected frame for screen readers and keyboard users. */}
+      <p id={describedBy} className="text-muted-foreground min-h-4 truncate font-mono text-[11px]" aria-live="polite">{description}</p>
       <div className="text-muted-foreground flex min-h-6 flex-wrap items-center gap-1 text-xs">
         {crumbs.map((node, index) => (
           <span key={node.id} className="flex items-center gap-1">
@@ -216,7 +244,13 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
       </div>
       <div
         ref={container}
-        className="bg-well relative w-full rounded-xl border p-1"
+        className="bg-well focus-visible:ring-ring/60 relative w-full rounded-xl border p-1 outline-none focus-visible:ring-2"
+        tabIndex={0}
+        role="application"
+        aria-roledescription="flame graph"
+        aria-label="Flame graph. Arrow keys move between frames, Enter zooms into the selected frame, Escape zooms out."
+        aria-describedby={describedBy}
+        onKeyDown={onKeyDown}
         style={{ height: depth * ROW + 10 }}
         onMouseMove={(event) => {
           const node = nodeAt(event);
@@ -230,6 +264,10 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
       >
         <div className="absolute inset-1 overflow-hidden rounded-lg">
           <Boxes boxes={boxes} diff={diff} matches={matches} focus={focus} />
+          {cursor && (() => {
+            const box = boxes.find((entry) => entry.node === cursor);
+            return box ? <div className="pointer-events-none absolute rounded-[4px] ring-2 ring-foreground" style={{ left: box.x + 1, top: box.depth * ROW + 1, width: Math.max(2, box.width - 2), height: ROW - 2 }} /> : null;
+          })()}
         </div>
         {hover && (
           <div
@@ -247,7 +285,7 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
               <div className="flex justify-between gap-6"><span className="text-muted-foreground">Head total</span><span className="font-mono">{ms(hover.node.head)}</span></div>
               <div className="flex justify-between gap-6">
                 <span className="text-muted-foreground">Change</span>
-                <span className={cn("font-mono font-medium", (hover.node.head ?? 0) > hover.node.base ? "text-red-600 dark:text-red-400" : "text-blue-600 dark:text-blue-400")}>
+                <span className={cn("font-mono font-medium", (hover.node.head ?? 0) > hover.node.base ? "text-bad" : "text-info")}>
                   {(hover.node.head ?? 0) - hover.node.base >= 0 ? "+" : ""}{ms((hover.node.head ?? 0) - hover.node.base)}
                   {hover.node.base > 0 ? ` (${(((hover.node.head ?? 0) / hover.node.base - 1) * 100).toFixed(1)}%)` : " (new)"}
                 </span>

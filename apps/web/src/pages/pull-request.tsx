@@ -68,6 +68,7 @@ function SeriesRow({ series, columns, statistic, threshold, extent, selected, on
       type="button"
       onClick={onSelect}
       data-selected={selected}
+      aria-current={selected ? "true" : undefined}
       className={cn("group grid w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors", ROW_GRID,
         selected ? "bg-accent" : "hover:bg-accent/50")}
     >
@@ -145,8 +146,14 @@ export function PullRequestPage() {
   const selected = report?.series.find((series) => series.id === selectedId) ?? null;
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if ((event.target as HTMLElement).closest("input, textarea, [role=combobox]")) return;
+      // Only plain keys that no focused control, open menu or dialog has handled move between series.
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement;
+      if (target.closest("input, textarea, select, [contenteditable], [role=combobox], [role=listbox], [role=option], [role=menu], [role=menuitem], [role=dialog], [role=slider], [role=application]")) return;
+      if (document.querySelector("[data-radix-popper-content-wrapper], [role=dialog][data-state=open], [role=listbox]")) return;
       if (event.key !== "j" && event.key !== "k" && event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+      // Arrow keys keep scrolling the page unless focus is inside the series list; j/k work anywhere.
+      if (event.key.startsWith("Arrow") && !target.closest("[data-series-list]")) return;
       const step = event.key === "j" || event.key === "ArrowDown" ? 1 : -1;
       const next = visible[Math.max(0, Math.min(visible.length - 1, selectedIndex + step))];
       if (next) { event.preventDefault(); update({ series: next.id }); }
@@ -354,7 +361,7 @@ export function PullRequestPage() {
               </div>
             </div>
             {view === "list" && (
-              <div className="@container px-2 pb-2">
+              <div className="@container px-2 pb-2" data-series-list role="group" aria-label="Series">
                 <div className={cn("text-muted-foreground grid gap-3 px-3 pb-1.5 font-mono text-[10px] tracking-wide whitespace-nowrap uppercase", ROW_GRID)}>
                   <span>Series</span><span style={{ width: columns.length * 9 - 3 }}>Commits</span><span className="hidden @xl:block">Trend</span>
                   <span className="hidden @md:block">Head · 95% CI</span><span className="text-right">Δ head</span><span />

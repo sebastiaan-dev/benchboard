@@ -96,8 +96,8 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
             {steps.map((step, index) => (
               <th key={index} className="border-b px-1 pb-2 text-center text-xs font-normal">
                 <span className="inline-flex gap-1.5 font-mono">
-                  {step.regressions > 0 && <span className="text-red-600 dark:text-red-400">▲{step.regressions}</span>}
-                  {step.improvements > 0 && <span className="text-emerald-600 dark:text-emerald-400">▼{step.improvements}</span>}
+                  {step.regressions > 0 && <span className="text-bad">▲{step.regressions}</span>}
+                  {step.improvements > 0 && <span className="text-good">▼{step.improvements}</span>}
                   {!step.regressions && !step.improvements && <span className="text-muted-foreground/50">·</span>}
                 </span>
               </th>
@@ -140,7 +140,7 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
                           {content}
                           {cell.profiled && <Flame className="absolute bottom-0.5 left-0.5 size-3 text-orange-500/80" />}
                           {stepMarked(step) && (
-                            <span className={cn("absolute top-0.5 right-0.5", step === "REGRESSION" ? "text-red-600 dark:text-red-400" : "text-emerald-600 dark:text-emerald-400")}>
+                            <span className={cn("absolute top-0.5 right-0.5", step === "REGRESSION" ? "text-bad" : "text-good")}>
                               {step === "REGRESSION" ? <ArrowUp className="size-3" /> : <ArrowDown className="size-3" />}
                             </span>
                           )}
