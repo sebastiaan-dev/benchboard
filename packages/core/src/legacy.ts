@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import { repositoryIdentity, resolveCommit, type RepositoryIdentity } from "./git.ts";
-import type { Store } from "./store.ts";
+import { prepareRun, type PreparedRun } from "./prepare.ts";
 
 const LEGACY_ID = /^\d{8}T\d{9}Z-[\da-f]{8}$/;
 
@@ -66,13 +66,18 @@ export function inferRevision(text: string | undefined, checkout: string | null,
 	return { sha, dirty: dirty ?? (sha === head ? headDirty ?? null : null) };
 }
 
+/** Where imported runs go: a local store or a server, given the legacy IDs it already has. */
+export interface LegacyImportTarget {
+	known: Set<string>;
+	ingest(run: PreparedRun): unknown;
+}
+
 /** Imports the `/bench` extension's per-run directories (manifest.json + hyperfine.json). Idempotent. */
-export function importLegacy(store: Store, directory: string): LegacyImportResult {
+export async function importLegacy(target: LegacyImportTarget, directory: string): Promise<LegacyImportResult> {
 	const result: LegacyImportResult = { imported: 0, skipped: 0, failed: [] };
 	if (!fs.existsSync(directory)) return result;
-	const exists = store.db.query("SELECT 1 FROM run WHERE legacy_id = ?");
 	for (const id of fs.readdirSync(directory).filter((name) => LEGACY_ID.test(name)).sort()) {
-		if (exists.get(id)) { result.skipped++; continue; }
+		if (target.known.has(id)) { result.skipped++; continue; }
 		try {
 			const folder = path.join(directory, id);
 			const manifest = JSON.parse(fs.readFileSync(path.join(folder, "manifest.json"), "utf8")) as LegacyManifest;
@@ -86,8 +91,8 @@ export function importLegacy(store: Store, directory: string): LegacyImportResul
 			const inferredCommits = exported.results.map((_, index) => inferRevision(
 				options.cases?.[index]?.revision, checkout, manifest.repository.head, manifest.repository.dirty,
 			));
-			store.ingest({
-				file, cwd: checkout ?? folder, allowDuplicate: true,
+			await target.ingest(prepareRun({
+				file, cwd: checkout ?? folder,
 				metadata: {
 					title: options.title, baseline: options.baseline, warmup: options.warmup, conditions: options.conditions,
 					environment: options.environment, invocation: options.invocation,
@@ -104,7 +109,7 @@ export function importLegacy(store: Store, directory: string): LegacyImportResul
 						branch: null, dirty: manifest.repository.dirty ?? null,
 					},
 				},
-			});
+			}));
 			result.imported++;
 		} catch (error) {
 			result.failed.push({ id, error: (error as Error).message });

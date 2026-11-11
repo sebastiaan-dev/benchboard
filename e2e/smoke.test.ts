@@ -109,3 +109,34 @@ test.skipIf(!ready)("series shortcuts ignore open dropdowns; flame graphs work f
 	assert.match(await profile.page.locator("[aria-live=polite]").first().innerText(), /total .* self/);
 	await profile.page.context().close();
 }, 60_000);
+
+test.skipIf(!ready)("servers with token auth show a sign-in page; read-only sessions hide writes", async () => {
+	const authPort = port + 1000;
+	const cli = (...args: string[]) => execFileSync("bun", ["packages/cli/bin/benchboard.ts", ...args], { cwd: root, env: { ...process.env, BENCHBOARD_HOME: home }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+	const reader = cli("token", "create", "e2e-reader", "--scope", "read");
+	const secured = spawn("bun", ["packages/cli/bin/benchboard.ts", "serve", "--port", String(authPort), "--auth", "token"],
+		{ cwd: root, env: { ...process.env, BENCHBOARD_HOME: home }, stdio: ["ignore", "ignore", "pipe"] });
+	try {
+		await new Promise<void>((resolve) => secured.stderr!.on("data", (chunk: Buffer) => chunk.toString().includes("serving") && resolve()));
+		const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+		const page = await context.newPage();
+		const errors: string[] = [];
+		page.on("pageerror", (error) => errors.push(error.message));
+		await page.goto(`http://localhost:${authPort}/pr/1`, { waitUntil: "networkidle" });
+		await page.getByRole("heading", { name: "Sign in to Benchboard" }).waitFor();
+		await page.getByLabel("API token").fill("bb_not-a-token");
+		await page.getByRole("button", { name: "Sign in" }).click();
+		await page.getByRole("alert").waitFor();
+		await page.getByLabel("API token").fill(reader);
+		await page.getByRole("button", { name: "Sign in" }).click();
+		await page.locator("main").getByText("Vectorized hash join probe").first().waitFor();
+		assert.equal(await page.locator('button:has-text("Sync")').count(), 0, "read-only sessions cannot sync");
+		await page.getByRole("button", { name: /e2e-reader/ }).click();
+		await page.getByRole("menuitem", { name: "Sign out" }).click();
+		await page.getByRole("heading", { name: "Sign in to Benchboard" }).waitFor();
+		assert.deepEqual(errors, []);
+		await context.close();
+	} finally {
+		secured.kill();
+	}
+}, 60_000);

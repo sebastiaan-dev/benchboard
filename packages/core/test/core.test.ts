@@ -4,10 +4,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
+import { Database } from "bun:sqlite";
 
 import {
 	Store, bootstrapRatio, inferRevision, normalizeRemote, parseHyperfineExport, pullRequestReport, random, slug, statistics,
-	verdictFor,
+	verdictFor, SCHEMA_VERSION, listTokens, prepareRun,
 } from "../src/index.ts";
 
 // node:test-style cleanup registration on top of bun:test.
@@ -298,4 +299,40 @@ test("run and profile listings page and search by title, SHA prefix and benchmar
 	assert.equal(store.runCount({ repositoryId, search: "B" }), 7, "benchmark key, case-insensitive");
 	assert.equal(store.runCount({ repositoryId, search: "50%_" }), 0, "LIKE wildcards are escaped");
 	assert.equal(store.profileCount(repositoryId), 0);
+});
+
+test("schema upgrades keep a snapshot of the previous database; newer databases are refused", () => {
+	const home = temporary(t, "benchboard-migrate-");
+	new Store(home).close();
+	const file = path.join(home, "benchboard.db");
+	assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+	// Pretend the database predates the token table.
+	const old = new Database(file);
+	old.run("DROP TABLE api_token");
+	old.run(`PRAGMA user_version = ${SCHEMA_VERSION - 1}`);
+	old.close();
+	const store = new Store(home);
+	assert.ok(fs.existsSync(`${file}.v${SCHEMA_VERSION - 1}.bak`));
+	assert.equal(listTokens(store).length, 0);
+	store.db.run(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
+	store.close();
+	assert.throws(() => new Store(home), /Upgrade benchboard/);
+});
+
+test("prepared runs from clients are validated before anything is stored", () => {
+	const home = temporary(t, "benchboard-prepared-");
+	const store = new Store(home);
+	t.after(() => store.close());
+	const file = path.join(home, "export.json");
+	hyperfine(file, [{ command: "x", times: samples(1, 10, 1) }]);
+	const valid = prepareRun({ file, cwd: home, metadata: { commit: "a".repeat(40) } });
+	assert.throws(() => store.ingestPrepared({ ...valid, cases: [{ sha: "abc", dirty: false, inferred: false }] }), /full 40-character/);
+	assert.throws(() => store.ingestPrepared({ ...valid, cases: [] }), /attributes 0 cases but the export has 1/);
+	assert.throws(() => store.ingestPrepared({ ...valid, metadata: { cases: [{ profile: "/etc/passwd" }] } }), /carry profiles separately/);
+	assert.throws(() => store.ingestPrepared({ ...valid, profiles: [{ bytes: new Uint8Array(1), syms: null, symsName: null, caseIndex: 3 }] }), /outside the export/);
+	assert.throws(() => store.ingestPrepared({ ...valid, repository: { ...valid.repository, slug: "" } }), /repository\.slug/);
+	assert.equal(store.runCount(), 0);
+	const result = store.ingestPrepared(valid, { remote: true });
+	assert.equal(result.repository.localPath, null);
+	assert.equal(result.measurements[0].commitSha, "a".repeat(40));
 });

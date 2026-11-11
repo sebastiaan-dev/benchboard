@@ -7,6 +7,7 @@ import { DeltaPill, SegmentedBar, verdictVar } from "@/components/kit/encodings"
 import { ErrorState, LoadingState } from "@/components/bench/states";
 import { Crumbs } from "@/components/shell";
 import { useGraphQL } from "@/lib/graphql";
+import { useSession } from "@/lib/session";
 import { relativeTime, verdictLabel } from "@/lib/format";
 
 const HomeQuery = graphql(`
@@ -23,10 +24,15 @@ const HomeQuery = graphql(`
 `);
 
 /** Commands for a first ingest, shared by the empty states. */
-export const gettingStartedSteps = (state: { tracked: boolean; measured: boolean; profiled: boolean }) => [
+export const gettingStartedSteps = (state: { tracked: boolean; measured: boolean; profiled: boolean; server?: string | null }) => [
+  ...(state.server ? [{
+    title: "Point the CLI at this server",
+    description: <>On each machine that runs benchmarks. Needs a <code>write</code> token (<code>benchboard token create &lt;name&gt;</code> on the server); <code>BENCHBOARD_SERVER</code> and <code>BENCHBOARD_TOKEN</code> work too.</>,
+    command: `benchboard login ${state.server}`,
+  }] : []),
   {
     title: "Track a pull request or branch", done: state.tracked,
-    description: "Run in your checkout. GitHub PRs need the gh CLI; local branches use git.",
+    description: "Run in your checkout. GitHub PRs use GITHUB_TOKEN or your gh login; local branches use git.",
     command: "benchboard pr track --branch            # or: benchboard pr track 1234",
   },
   {
@@ -44,6 +50,7 @@ export const gettingStartedSteps = (state: { tracked: boolean; measured: boolean
 /** Cross-repository landing: the pull requests that need a look first. */
 export function HomePage() {
   const query = useGraphQL(HomeQuery, {});
+  const session = useSession().data;
   if (query.isPending) return <LoadingState rows={1} />;
   if (query.error) return <ErrorState error={query.error} />;
   const repositories = query.data.repositories;
@@ -51,7 +58,7 @@ export function HomePage() {
     return (
       <div className="mx-auto max-w-2xl space-y-5 py-6">
         <Crumbs items={[{ label: "Getting started" }]} />
-        <Checklist icon={Rocket} title="Get started with Benchboard" steps={gettingStartedSteps({ tracked: false, measured: false, profiled: false })}
+        <Checklist icon={Rocket} title="Get started with Benchboard" steps={gettingStartedSteps({ tracked: false, measured: false, profiled: false, server: session?.auth === "token" ? window.location.origin : null })}
           footer={<div className="space-y-2 text-sm"><span className="text-muted-foreground">Just looking? Load a synthetic PR with profiles from the benchboard checkout:</span>
             <Command>BENCHBOARD_HOME=/tmp/benchboard-demo bun run seed:demo</Command></div>} />
       </div>

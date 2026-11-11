@@ -16,11 +16,11 @@ import { useGraphQL } from "@/lib/graphql";
 import { dateTime, seriesName } from "@/lib/format";
 
 const ProfileQuery = graphql(`
-  query Profile($id: ID!, $origin: String!) {
+  query Profile($id: ID!) {
     profile(id: $id) {
       ...ProfileHeader
       tree
-      firefoxProfilerUrl(origin: $origin)
+      firefoxProfilerUrl
       related { id label cpuMs measurement { commitSha dirty run { title recordedAt } } }
     }
   }
@@ -33,7 +33,7 @@ export function ProfilePage() {
   const [sort, setSort] = useState<"self" | "total">("self");
   const [rows, setRows] = useState(40);
   const [metric, setMetric] = useState<Metric>("cpu");
-  const query = useGraphQL(ProfileQuery, { id, origin: window.location.origin });
+  const query = useGraphQL(ProfileQuery, { id });
   const profile = query.data?.profile;
   const tree = profile?.tree as CallTree | undefined;
   const threads = useThreadView(tree);

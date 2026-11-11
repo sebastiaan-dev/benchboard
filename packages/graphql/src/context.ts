@@ -1,14 +1,25 @@
-import type { Benchmark, Commit, Machine, Measurement, Profile, Repository, Run, Store } from "@benchboard/core";
+import type { Benchmark, Commit, Machine, Measurement, Principal, Profile, Repository, Run, Store } from "@benchboard/core";
+
+/** Builds URLs that leave the app, e.g. for the Firefox Profiler, which fetches without credentials. */
+export interface Links {
+	/** Absolute base URL serving a profile's raw file and symbols: `<base>/profile.json.gz`, `<base>/symbols`. */
+	profileBase(profileId: number): string;
+}
 
 export interface Context {
 	store: Store;
-	/** Whether the caller may run mutations: true in-process, or with the server's session token over HTTP. */
-	mayMutate: boolean;
+	/** Who is asking; null for anonymous callers. Mutations check the principal's scope. */
+	principal: Principal | null;
+	links: Links;
 	loaders: Loaders;
 }
 
-export function createContext(store: Store, mayMutate: boolean): Context {
-	return { store, mayMutate, loaders: new Loaders(store) };
+export const localLinks = (origin = "http://localhost:4319"): Links => ({
+	profileBase: (id) => `${origin}/profiles/${id}`,
+});
+
+export function createContext(store: Store, principal: Principal | null, links: Links = localLinks()): Context {
+	return { store, principal, links, loaders: new Loaders(store) };
 }
 
 /**

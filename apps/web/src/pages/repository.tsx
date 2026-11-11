@@ -12,6 +12,7 @@ import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
 import { DeltaPill, Segmented, SegmentedBar, Sparkline, verdictVar } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
+import { allows, useSession } from "@/lib/session";
 import { dateTime, duration, primaryMachine, relativeTime, seriesName, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { RepositoryPageQuery } from "@/gql/graphql";
@@ -116,6 +117,8 @@ function TrackPullRequest({ repository }: { repository: string }) {
   const [reference, setReference] = useState("");
   const track = useGraphQLMutation(TrackMutation);
   const navigate = useNavigate();
+  const canWrite = allows(useSession().data, "write");
+  if (!canWrite) return null;
   return (
     <form className="flex gap-2" onSubmit={(event) => {
       event.preventDefault();

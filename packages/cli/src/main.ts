@@ -3,14 +3,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { parseArgs, stripVTControlCharacters, styleText } from "node:util";
 import { spawn } from "node:child_process";
-import { graphql } from "graphql";
 import {
-	Store, diffFunctions, parsePullRequestReference, functionStats, importLegacy, pullRequestReport, type Profile, type PullRequest, type PullRequestReport, type Measurement, type Comparison,
-	type Repository,
+	Store, backup, createToken, githubRemotes, importLegacy, listTokens, parsePullRequestReference, parseScope, prepareProfile,
+	prepareRun, repositoryIdentity, resolveCommit, revokeToken, snapshotGithubPullRequest, snapshotLocalBranch, verify,
+	type Comparison, type Measurement, type Profile, type PullRequest, type PullRequestSnapshot,
 } from "@benchboard/core";
-import { createContext, createSchema, typeDefs } from "@benchboard/graphql";
-import { createServer, DEFAULT_PORT } from "./server.ts";
-import { profileRoutes } from "./profile-routes.ts";
+import { typeDefs } from "@benchboard/graphql";
+import { LocalBackend, type Backend, type ReportBundle } from "./backend.ts";
+import { RemoteBackend } from "./remote.ts";
+import { readLogin, removeLogin, resolveTarget, saveLogin, configFile } from "./config.ts";
+import { createServer, DEFAULT_PORT, serverOptionsFromEnv } from "./server.ts";
 
 const HELP = `benchboard — track Hyperfine benchmarks across commits and pull requests
 
@@ -43,14 +45,26 @@ Usage:
                                               Per-function time change between two profiles
   benchboard runs [--limit n] [--all]         Recent runs
   benchboard query <graphql|@file> [--variables <json>]
-                                              Execute a GraphQL document locally; prints JSON
-  benchboard schema                           Print the GraphQL schema
-  benchboard serve [--port ${DEFAULT_PORT}] [--host 127.0.0.1] [--open]
-  benchboard open [pr <ref> | run <id>] [--port ${DEFAULT_PORT}]
-                                              Open the dashboard, starting a background server if needed
+                                              Execute a GraphQL document; prints JSON
+  benchboard open [pr <ref> | run <id>]       Open the dashboard (starts a local server if needed)
   benchboard import-legacy [dir]              Import pi /bench runs (~/.pi/agent/benchmarks)
+  benchboard schema                           Print the GraphQL schema
 
-Common options: --cwd <dir>  --json  --home <dir> (or BENCHBOARD_HOME)
+Servers (see docs/deployment.md):
+  benchboard login <url> [--token <t>]        Use a Benchboard server (token read from stdin if omitted)
+  benchboard logout                           Forget the saved server login
+  benchboard whoami                           Show where commands go and with which access
+  benchboard serve [--host 127.0.0.1] [--port ${DEFAULT_PORT}] [--auth none|token] [--public-url <url>] [--open]
+  benchboard token create <name> [--scope read|write|admin]
+  benchboard token list [--all] | token revoke <id|name>
+                                              Manage API tokens of the local data directory
+  benchboard backup <dir>                     Consistent, incremental copy of the data directory
+  benchboard verify                           Check database integrity and stored files
+  benchboard healthcheck [--port ${DEFAULT_PORT}]      Exit 0 if the local server answers (for containers)
+
+Where commands go: --server <url> or BENCHBOARD_SERVER (token: BENCHBOARD_TOKEN or \`benchboard login\`),
+else the local data directory (--home <dir>, BENCHBOARD_HOME or ~/.local/share/benchboard; --local forces it).
+Common options: --cwd <dir>  --json
 PR refs: a number (GitHub PR in this repository), a local branch name, or id:<n>.`;
 
 /** The run was saved but PR/branch tracking failed; do not re-ingest, retry tracking instead. */
@@ -81,30 +95,6 @@ function readMetadata(source: string | undefined): unknown {
 	}
 }
 
-function currentRepository(store: Store, cwd: string): Repository {
-	const repository = store.repositoryForCheckout(cwd);
-	if (!repository) throw new Error(`No benchmarks or pull requests recorded for the repository at ${cwd}.`);
-	return repository;
-}
-
-function resolvePullRequest(store: Store, cwd: string, reference: string): PullRequest {
-	const internal = /^id:(\d+)$/.exec(reference);
-	if (internal) {
-		const pr = store.pullRequest(Number(internal[1]));
-		if (!pr) throw new Error(`No tracked pull request with id ${internal[1]}.`);
-		return pr;
-	}
-	const url = /github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/.exec(reference) ?? /^([\w.-]+\/[\w.-]+)#(\d+)$/.exec(reference);
-	if (url) {
-		const pr = store.pullRequests().find((entry) => entry.githubRepo === url[1] && entry.number === Number(url[2]));
-		if (!pr) throw new Error(`${reference} is not tracked; run \`benchboard pr track ${reference}\`.`);
-		return pr;
-	}
-	const pr = store.findPullRequest(currentRepository(store, cwd).id, reference.replace(/^#/, ""));
-	if (!pr) throw new Error(`No tracked pull request "${reference}" in this repository; run \`benchboard pr track\` first.`);
-	return pr;
-}
-
 const prName = (pr: PullRequest) => pr.source === "github" ? `${pr.githubRepo}#${pr.number}` : `branch ${pr.headRef}`;
 
 function verdictText(comparison: Comparison | null): string {
@@ -116,9 +106,11 @@ function verdictText(comparison: Comparison | null): string {
 	return color(styles[comparison.verdict], `${text} ${verdict}${comparison.sameRun ? "" : " (cross-invocation)"}`);
 }
 
-function printReport(store: Store, report: PullRequestReport) {
+function printReport({ report, machines, benchmarks, commits }: ReportBundle) {
 	const pr = report.pullRequest;
-	const machine = report.machineId === null ? undefined : store.machine(report.machineId);
+	const machine = machines.find((entry) => entry.id === report.machineId);
+	const benchmark = new Map(benchmarks.map((entry) => [entry.id, entry]));
+	const commit = new Map(commits.map((entry) => [entry.sha, entry]));
 	console.log(color("bold", `${prName(pr)}: ${clean(pr.title)}`));
 	console.log(`${pr.baseRef}@${pr.baseSha?.slice(0, 10) ?? "?"} → ${pr.headRef}@${pr.headSha.slice(0, 10)} · ${report.commits.length - (pr.baseSha ? 1 : 0)} commits`);
 	console.log(`Statistic ${report.statistic}, threshold ±${(report.threshold * 100).toFixed(1)}%, 95% bootstrap CI` +
@@ -135,16 +127,15 @@ function printReport(store: Store, report: PullRequestReport) {
 		return;
 	}
 	for (const series of report.series) {
-		const benchmark = store.benchmark(series.benchmarkId)!;
-		console.log("\n" + color("bold", `${benchmark.key}${series.caseKey === "default" ? "" : ` / ${series.caseKey}`}`) +
+		const key = benchmark.get(series.benchmarkId)?.key ?? `benchmark ${series.benchmarkId}`;
+		console.log("\n" + color("bold", `${key}${series.caseKey === "default" ? "" : ` / ${series.caseKey}`}`) +
 			color("dim", `  ${clean(series.label).slice(0, 80)}`));
 		const versus = series.referenceIsBase ? "base" : "first measured commit";
 		if (series.head) console.log(`  head vs ${versus}: ${verdictText(series.headComparison)}`);
 		else console.log(`  head not measured; latest measured #${series.latest?.position} vs ${versus}: ${verdictText(series.latestComparison)}`);
 		for (const point of series.points) {
-			const commit = store.commit(pr.repositoryId, point.sha);
 			const label = `${point.isBase ? "base" : String(point.position).padStart(4)} ${point.sha.slice(0, 10)}`;
-			const subject = clean(commit?.subject ?? "").slice(0, 48).padEnd(48);
+			const subject = clean(commit.get(point.sha)?.subject ?? "").slice(0, 48).padEnd(48);
 			const m: Measurement | null = point.measurement;
 			if (!m) { console.log(color("dim", `  ${label} ${subject} not measured`)); continue; }
 			const value = report.statistic === "mean" ? m.mean : m.median;
@@ -157,7 +148,7 @@ function printReport(store: Store, report: PullRequestReport) {
 
 async function reachable(port: number): Promise<boolean> {
 	try {
-		const response = await fetch(`http://127.0.0.1:${port}/graphql?query=%7B__typename%7D`, { signal: AbortSignal.timeout(1000) });
+		const response = await fetch(`http://127.0.0.1:${port}/healthz`, { signal: AbortSignal.timeout(1000) });
 		return response.ok;
 	} catch {
 		return false;
@@ -181,30 +172,76 @@ async function ensureServer(home: string, port: number, explicitHome: string | u
 	throw new Error(`The server did not start; see ${path.join(home, "serve.log")}.`);
 }
 
-async function serve(store: Store, host: string, port: number, openBrowser: boolean): Promise<number> {
-	const server = createServer(store, { host, port, routes: [profileRoutes(store)] });
-	const url = `http://${host.includes(":") ? `[${host}]` : host === "127.0.0.1" ? "localhost" : host}:${port}`;
-	console.error(`benchboard serving ${url} (GraphQL at ${url}/graphql), data in ${store.home}`);
+async function serve(store: Store, flags: { host?: string; port?: string; auth?: string; publicUrl?: string }, openBrowser: boolean): Promise<number> {
+	const options = serverOptionsFromEnv(flags);
+	const server = createServer(store, options);
+	const local = `http://${options.host.includes(":") ? `[${options.host}]` : options.host === "127.0.0.1" || options.host === "0.0.0.0" ? "localhost" : options.host}:${server.port}`;
+	const url = options.publicUrl ?? local;
+	console.error(`benchboard serving ${url} (GraphQL at ${url}/graphql; listening on ${options.host}:${server.port}, auth ${options.auth}), data in ${store.home}`);
 	if (openBrowser) open(url);
 	await new Promise<void>((resolve) => {
-		const stop = () => void server.stop().then(() => resolve());
+		const stop = () => {
+			console.error("benchboard: shutting down");
+			void server.stop().then(() => resolve());
+		};
 		process.once("SIGINT", stop);
 		process.once("SIGTERM", stop);
 	});
+	store.db.run("PRAGMA optimize");
 	return 0;
 }
+
+/** Reads a secret from stdin: without echo on a terminal, else the first line of piped input. */
+async function readSecret(prompt: string): Promise<string> {
+	if (!process.stdin.isTTY) return fs.readFileSync(0, "utf8").split("\n", 1)[0].trim();
+	process.stderr.write(prompt);
+	process.stdin.setRawMode(true);
+	process.stdin.resume();
+	let value = "";
+	try {
+		for await (const chunk of process.stdin) {
+			for (const char of String(chunk)) {
+				if (char === "\r" || char === "\n") return value.trim();
+				if (char === "\u0003") throw new Error("Cancelled.");
+				if (char === "\u007f") value = value.slice(0, -1);
+				else value += char;
+			}
+		}
+		return value.trim();
+	} finally {
+		process.stdin.setRawMode(false);
+		process.stdin.pause();
+		process.stderr.write("\n");
+	}
+}
+
+/** Snapshots a GitHub PR, looking up the repository through the checkout's remotes when not given. */
+function githubSnapshot(cwd: string, reference: string | number, knownRepo?: string | null): Promise<PullRequestSnapshot> {
+	const parsed = parsePullRequestReference(String(reference));
+	const identity = repositoryIdentity(cwd);
+	const checkout = identity.root;
+	return snapshotGithubPullRequest({
+		number: parsed.number,
+		candidates: parsed.githubRepo ? [parsed.githubRepo] : [...new Set([...(checkout ? githubRemotes(checkout) : []), ...(knownRepo ? [knownRepo] : [])])],
+		repository: checkout ? identity : null,
+		resolveLocal: checkout ? (sha) => resolveCommit(checkout, sha) : undefined,
+	});
+}
+
+const slugOf = (cwd: string) => repositoryIdentity(cwd).slug;
 
 export async function main(argv: string[]): Promise<number> {
 	const { values: options, positionals } = parseArgs({
 		args: argv, allowPositionals: true, strict: true,
 		options: {
 			help: { type: "boolean", short: "h" }, json: { type: "boolean" }, cwd: { type: "string" }, home: { type: "string" },
+			server: { type: "string" }, local: { type: "boolean" }, token: { type: "string" }, scope: { type: "string" },
 			meta: { type: "string" }, benchmark: { type: "string" }, title: { type: "string" }, commit: { type: "string" },
 			dirty: { type: "boolean" }, clean: { type: "boolean" }, pr: { type: "string" }, "track-branch": { type: "boolean" },
 			"allow-duplicate": { type: "boolean" }, branch: { type: "boolean" }, base: { type: "string" },
 			all: { type: "boolean" }, statistic: { type: "string" }, threshold: { type: "string" }, machine: { type: "string" },
 			"include-dirty": { type: "boolean" }, limit: { type: "string" }, variables: { type: "string" },
-			port: { type: "string" }, host: { type: "string" }, open: { type: "boolean" },
+			port: { type: "string" }, host: { type: "string" }, open: { type: "boolean" }, auth: { type: "string" }, "public-url": { type: "string" },
 			syms: { type: "string" }, iterations: { type: "string" }, label: { type: "string" }, rate: { type: "string" },
 			metric: { type: "string" }, "measured-on": { type: "string" },
 		},
@@ -213,7 +250,24 @@ export async function main(argv: string[]): Promise<number> {
 	if (options.help || !command || command === "help") { console.log(HELP); return command || options.help ? 0 : 1; }
 	if (command === "schema") { process.stdout.write(typeDefs); return 0; }
 	const cwd = path.resolve(options.cwd ?? process.cwd());
-	const store = new Store(options.home ? path.resolve(options.home) : undefined);
+	const home = options.home ? path.resolve(options.home) : undefined;
+
+	let store: Store | undefined;
+	const openStore = () => store ??= new Store(home);
+	/** Commands that manage a data directory itself always work locally (run them on the server host). */
+	const localOnly = () => {
+		if (options.server) throw new Error(`\`benchboard ${command}\` works on a local data directory; run it on the server host.`);
+		return openStore();
+	};
+	let backend: Backend | undefined;
+	const getBackend = (): Backend => {
+		if (backend) return backend;
+		const target = resolveTarget({ server: options.server, local: options.local, home });
+		backend = target.kind === "remote" ? new RemoteBackend(target.server, target.token)
+			: new LocalBackend(openStore(), { webUrl: `http://localhost:${options.port ?? DEFAULT_PORT}` });
+		return backend;
+	};
+
 	try {
 		switch (command) {
 			case "ingest": {
@@ -229,21 +283,22 @@ export async function main(argv: string[]): Promise<number> {
 				const pullRequest = metadata.pullRequest as string | number | undefined;
 				// Reject malformed references before anything is saved.
 				if (pullRequest !== undefined) parsePullRequestReference(String(pullRequest));
-				const result = store.ingest({ file: rest[0], cwd, metadata, allowDuplicate: options["allow-duplicate"] });
+				const api = getBackend();
+				const result = await api.ingest(prepareRun({ file: rest[0], cwd, metadata }), { allowDuplicate: options["allow-duplicate"] });
 				// The run is durable from here on: tracking failures are reported alongside it, never instead of it.
 				const tracked: PullRequest[] = [];
 				const trackingErrors: string[] = [];
-				const attempt = async (what: string, track: () => Promise<PullRequest> | PullRequest) => {
+				const attempt = async (what: string, snapshot: () => Promise<PullRequestSnapshot> | PullRequestSnapshot) => {
 					try {
-						tracked.push(await track());
+						tracked.push((await api.savePullRequest(await snapshot())).pullRequest);
 					} catch (error) {
 						trackingErrors.push(`${what}: ${(error as Error).message}`);
 					}
 				};
-				if (pullRequest !== undefined) await attempt(`pull request ${pullRequest}`, () => store.syncGithubPullRequest({ cwd, reference: pullRequest }));
-				if (options["track-branch"]) await attempt("branch", () => store.syncLocalBranch({ cwd, base: options.base }));
+				if (pullRequest !== undefined) await attempt(`pull request ${pullRequest}`, () => githubSnapshot(cwd, pullRequest));
+				if (options["track-branch"]) await attempt("branch", () => snapshotLocalBranch({ cwd, base: options.base }));
 				if (options.json) {
-					json({ ...result, pullRequests: tracked, trackingErrors, url: `http://localhost:${DEFAULT_PORT}/runs/${result.run.id}` });
+					json({ ...result, pullRequests: tracked, trackingErrors, url: `${api.webUrl}/runs/${result.run.id}` });
 				} else {
 					console.log(`Saved run ${result.run.id} → ${result.repository.slug} / ${result.benchmark.key}`);
 					for (const m of result.measurements) {
@@ -252,6 +307,7 @@ export async function main(argv: string[]): Promise<number> {
 					}
 					for (const warning of result.warnings) console.log(color("yellow", `warning: ${warning}`));
 					for (const pr of tracked) console.log(`Tracking ${prName(pr)} (id ${pr.id}): benchboard pr report id:${pr.id}`);
+					console.log(color("dim", `${api.webUrl}/runs/${result.run.id}`));
 				}
 				if (trackingErrors.length) {
 					for (const error of trackingErrors) console.error(`benchboard: run ${result.run.id} was saved, but tracking failed (${error}).`);
@@ -262,24 +318,41 @@ export async function main(argv: string[]): Promise<number> {
 			}
 			case "pr": {
 				const [action, reference] = rest;
-				if (action === "track") {
-					const pr = options.branch
-						? store.syncLocalBranch({ cwd, head: reference, base: options.base })
-						: reference ? await store.syncGithubPullRequest({ cwd, reference }) : undefined;
-					if (!pr) throw new Error("Usage: benchboard pr track <ref> | --branch [name] [--base ref]");
+				const api = getBackend();
+				const report = (tracked: { pullRequest: PullRequest; commitCount: number }, verb: string) => {
+					const pr = tracked.pullRequest;
 					if (options.json) json(pr);
-					else console.log(`Tracking ${prName(pr)} (id ${pr.id}) with ${store.pullRequestCommits(pr.id).length} commits on base ${pr.baseSha?.slice(0, 10)}.`);
+					else console.log(`${verb} ${prName(pr)} (id ${pr.id}) with ${tracked.commitCount} commits on base ${pr.baseSha?.slice(0, 10)}.`);
+				};
+				if (action === "track") {
+					if (!options.branch && !reference) throw new Error("Usage: benchboard pr track <ref> | --branch [name] [--base ref]");
+					const snapshot = options.branch ? snapshotLocalBranch({ cwd, head: reference, base: options.base }) : await githubSnapshot(cwd, reference);
+					report(await api.savePullRequest(snapshot), "Tracking");
 					return 0;
 				}
 				if (action === "sync") {
 					if (!reference) throw new Error("Usage: benchboard pr sync <ref>");
-					const pr = await store.resyncPullRequest(resolvePullRequest(store, cwd, reference).id);
-					if (options.json) json(pr);
-					else console.log(`Synced ${prName(pr)}: ${store.pullRequestCommits(pr.id).length} commits, head ${pr.headSha.slice(0, 10)}.`);
+					const pr = await api.resolvePullRequest(slugOf(cwd), reference);
+					const repository = await api.repository(pr.repositoryId);
+					let snapshot: PullRequestSnapshot;
+					if (pr.source === "github") {
+						snapshot = await githubSnapshot(cwd, `${pr.githubRepo}#${pr.number}`);
+						// Only attribute the PR to this checkout when it is a clone of the PR's repository.
+						if (snapshot.repository && snapshot.repository.slug !== repository?.slug) snapshot = { ...snapshot, repository: null };
+					} else {
+						// Local branches come from a checkout: the recorded one when this is a local data directory, else cwd.
+						const recorded = api instanceof LocalBackend && repository?.localPath && fs.existsSync(repository.localPath) ? repository.localPath : null;
+						const checkout = recorded ?? cwd;
+						if (slugOf(checkout) !== repository?.slug) throw new Error(`Run this in a checkout of ${repository?.slug ?? "the branch's repository"}.`);
+						snapshot = snapshotLocalBranch({ cwd: checkout, head: pr.headRef, base: pr.baseRef, title: pr.title });
+					}
+					const tracked = await api.savePullRequest(snapshot);
+					if (options.json) json(tracked.pullRequest);
+					else console.log(`Synced ${prName(tracked.pullRequest)}: ${tracked.commitCount} commits, head ${tracked.pullRequest.headSha.slice(0, 10)}.`);
 					return 0;
 				}
 				if (action === "list") {
-					const prs = options.all ? store.pullRequests() : store.pullRequests(currentRepository(store, cwd).id);
+					const prs = await api.pullRequests(options.all ? null : slugOf(cwd));
 					if (options.json) json(prs);
 					else for (const pr of prs) console.log(`id:${pr.id}\t${prName(pr)}\t${pr.state}\t${clean(pr.title)}`);
 					return 0;
@@ -290,22 +363,23 @@ export async function main(argv: string[]): Promise<number> {
 					if (statistic !== "median" && statistic !== "mean") throw new Error("--statistic must be median or mean.");
 					const threshold = options.threshold === undefined ? 0.02 : Number(options.threshold) / 100;
 					if (!Number.isFinite(threshold) || threshold < 0) throw new Error("--threshold must be a nonnegative percentage.");
-					const report = pullRequestReport(store, resolvePullRequest(store, cwd, reference).id, {
+					const pr = await api.resolvePullRequest(slugOf(cwd), reference);
+					const bundle = await api.pullRequestReport(pr.id, {
 						statistic, threshold, includeDirty: options["include-dirty"],
 						machineId: options.machine === undefined ? undefined : Number(options.machine),
 					});
-					if (options.json) json(report);
-					else printReport(store, report);
+					if (options.json) json(bundle.report);
+					else printReport(bundle);
 					return 0;
 				}
 				throw new Error("Usage: benchboard pr <track|sync|list|report> ...");
 			}
 			case "profile": {
 				const [action, ...args] = rest;
+				const api = getBackend();
 				const iterations = options.iterations === undefined ? undefined : Number(options.iterations);
 				if (iterations !== undefined && (!Number.isSafeInteger(iterations) || iterations < 1)) throw new Error("--iterations must be a positive integer.");
-				const printProfile = (profile: Profile) => {
-					const m = store.measurement(profile.measurementId)!;
+				const printProfile = (profile: Profile, m: Measurement) => {
 					console.log(`Profile ${profile.id} → run ${m.runId} case ${m.position} [${m.caseKey}] @ ${m.commitSha?.slice(0, 10) ?? "?"}: ` +
 						`${profile.samples} samples, ${(profile.cpuMs / profile.iterations).toFixed(1)} ms on CPU and ${(profile.sampledMs / profile.iterations).toFixed(1)} ms sampled per iteration` +
 						`${profile.cpuSource === "sample-count" ? " (no CPU deltas: CPU estimated from samples)" : ""}, ` +
@@ -313,16 +387,15 @@ export async function main(argv: string[]): Promise<number> {
 				};
 				if (action === "attach") {
 					if (args.length !== 2) throw new Error("Usage: benchboard profile attach <run>[:<case>] <profile.json.gz>");
-					const profile = store.attachProfile({
-						measurementId: store.measurementByReference(args[0]).id, file: args[1], syms: options.syms, iterations,
-						label: options.label, cwd,
-					});
-					if (options.json) json(profile); else printProfile(profile);
+					const measurement = await api.measurement(args[0]);
+					const { profile, measurement: m } = await api.attachProfile(measurement.id,
+						prepareProfile({ file: args[1], syms: options.syms, iterations, label: options.label, cwd }));
+					if (options.json) json(profile); else printProfile(profile, m);
 					return 0;
 				}
 				if (action === "record") {
 					if (!args.length) throw new Error("Usage: benchboard profile record <run>[:<case>] [-- command...]");
-					const measurement = store.measurementByReference(args[0]);
+					const measurement = await api.measurement(args[0]);
 					const command = args.length > 1 ? args.slice(1) : ["sh", "-c", measurement.command ?? measurement.exportedCommand];
 					const directory = fs.mkdtempSync(path.join(os.tmpdir(), "benchboard-samply-"));
 					try {
@@ -331,42 +404,38 @@ export async function main(argv: string[]): Promise<number> {
 							...(options.rate ? ["--rate", options.rate] : []), ...(iterations ? ["--iteration-count", String(iterations)] : []), ...command],
 						{ cwd, stdout: "inherit", stderr: "inherit" });
 						if (samply.exitCode !== 0) throw new Error(`samply exited with ${samply.exitCode}; is it installed and set up (\`samply setup\` on macOS)?`);
-						const profile = store.attachProfile({
-							measurementId: measurement.id, file: output, iterations, label: options.label, command: command.join(" "), cwd,
-						});
-						if (options.json) json(profile); else printProfile(profile);
+						const { profile, measurement: m } = await api.attachProfile(measurement.id,
+							prepareProfile({ file: output, iterations, label: options.label, command: command.join(" "), cwd }));
+						if (options.json) json(profile); else printProfile(profile, m);
 					} finally {
 						fs.rmSync(directory, { recursive: true, force: true });
 					}
 					return 0;
 				}
 				const limit = Number(options.limit ?? 25);
-				const load = (value: string | undefined) => {
-					const profile = value && store.profile(Number(value));
-					if (!profile) throw new Error(`Unknown profile ${value ?? ""}.`);
-					return profile;
+				if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("--limit must be a positive integer.");
+				const profileId = (value: string | undefined) => {
+					if (!value || !/^\d+$/.test(value)) throw new Error(`Unknown profile ${value ?? ""}.`);
+					return Number(value);
 				};
 				const ms = (value: number) => `${value.toFixed(1)} ms`.padStart(11);
 				const metric = options.metric === "sampled" ? "sampled" : "cpu";
 				if (options.metric !== undefined && options.metric !== "cpu" && options.metric !== "sampled") throw new Error("--metric must be cpu or sampled.");
 				const metricLabel = metric === "cpu" ? "on-CPU" : "sampled (incl. off-CPU)";
 				if (action === "show") {
-					const profile = load(args[0]);
-					const tree = store.profileTree(profile.id);
-					const scale = 1 / profile.iterations;
-					const stats = functionStats(tree, metric).sort((a, b) => b.self - a.self).slice(0, limit)
-						.map((stat) => ({ ...stat, self: stat.self * scale, total: stat.total * scale }));
+					const id = profileId(args[0]);
+					const [{ profile, measurement }, stats] = await Promise.all([api.profile(id), api.profileFunctions(id, metric, limit)]);
 					if (options.json) { json(stats); return 0; }
-					printProfile(profile);
+					printProfile(profile, measurement);
 					console.log(`${"self".padStart(11)} ${"total".padStart(11)}  function · ${metricLabel} ms per iteration`);
 					for (const stat of stats) console.log(`${ms(stat.self)} ${ms(stat.total)}  ${clean(stat.name).slice(0, 120)}${stat.library ? color("dim", `  ${stat.library}`) : ""}`);
 					return 0;
 				}
 				if (action === "diff") {
-					const [base, head] = [load(args[0]), load(args[1])];
-					const deltas = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), {
-						metric, iterations: { base: base.iterations, head: head.iterations },
-					}).slice(0, limit);
+					const [baseId, headId] = [profileId(args[0]), profileId(args[1])];
+					const [{ profile: base }, { profile: head }, deltas] = await Promise.all([
+						api.profile(baseId), api.profile(headId), api.profileDiff(baseId, headId, metric, limit),
+					]);
 					if (options.json) { json(deltas); return 0; }
 					const total = (p: Profile) => (metric === "cpu" ? p.cpuMs : p.sampledMs) / p.iterations;
 					console.log(`${metric === "cpu" ? "On-CPU" : "Sampled"} time per iteration: ${total(base).toFixed(1)} ms → ${total(head).toFixed(1)} ms (${percent(total(head) / total(base))})`);
@@ -380,10 +449,7 @@ export async function main(argv: string[]): Promise<number> {
 				throw new Error("Usage: benchboard profile <attach|record|show|diff> ...");
 			}
 			case "runs": {
-				const runs = store.runs({
-					repositoryId: options.all ? undefined : currentRepository(store, cwd).id,
-					limit: options.limit ? Number(options.limit) : 20,
-				});
+				const runs = await getBackend().runs(options.all ? null : slugOf(cwd), options.limit ? Number(options.limit) : 20);
 				if (options.json) json(runs);
 				else for (const run of runs) console.log(`${run.id}\t${run.recordedAt}\t${clean(run.title ?? "(untitled)")}`);
 				return 0;
@@ -391,37 +457,116 @@ export async function main(argv: string[]): Promise<number> {
 			case "query": {
 				if (rest.length !== 1) throw new Error("Usage: benchboard query <graphql|@file> [--variables json]");
 				const source = rest[0].startsWith("@") ? fs.readFileSync(rest[0].slice(1), "utf8") : rest[0];
-				const variableValues = options.variables ? JSON.parse(options.variables) : undefined;
-				const result = await graphql({ schema: createSchema(), source, variableValues, contextValue: createContext(store, true) });
+				const variables = options.variables ? JSON.parse(options.variables) : undefined;
+				const result = await getBackend().query(source, variables);
 				json(result);
 				return result.errors?.length ? 1 : 0;
 			}
-			case "serve":
-				return await serve(store, options.host ?? "127.0.0.1", Number(options.port ?? DEFAULT_PORT), options.open ?? false);
 			case "open": {
-				const port = Number(options.port ?? DEFAULT_PORT);
-				await ensureServer(store.home, port, options.home);
+				const api = getBackend();
+				if (api instanceof LocalBackend) await ensureServer(api.store.home, Number(options.port ?? DEFAULT_PORT), options.home);
 				let route = "/";
-				if (rest[0] === "pr" && rest[1]) route = `/pr/${resolvePullRequest(store, cwd, rest[1]).id}`;
+				if (rest[0] === "pr" && rest[1]) route = `/pr/${(await api.resolvePullRequest(slugOf(cwd), rest[1])).id}`;
 				else if (rest[0] === "run" && rest[1]) route = `/runs/${rest[1]}`;
 				else {
-					const repository = store.repositoryForCheckout(cwd);
+					const repository = await api.repositoryBySlug(slugOf(cwd));
 					if (repository) route = `/repositories/${repository.id}`;
 				}
-				const url = `http://localhost:${port}${route}`;
+				const url = `${api.webUrl}${route}`;
 				console.log(url);
 				open(url);
 				return 0;
 			}
 			case "import-legacy": {
+				const api = getBackend();
 				const directory = path.resolve(rest[0] ?? path.join(os.homedir(), ".pi", "agent", "benchmarks"));
-				const result = importLegacy(store, directory);
+				const result = await importLegacy({ known: new Set(await api.legacyIds()), ingest: (run) => api.ingest(run, { allowDuplicate: true }) }, directory);
 				if (options.json) json(result);
 				else {
 					console.log(`Imported ${result.imported}, already present ${result.skipped}, failed ${result.failed.length}.`);
 					for (const failure of result.failed) console.log(`  ${failure.id}: ${failure.error}`);
 				}
 				return result.failed.length ? 1 : 0;
+			}
+			case "login": {
+				if (rest.length !== 1) throw new Error("Usage: benchboard login <server-url> [--token <token>]");
+				const token = options.token ?? process.env.BENCHBOARD_TOKEN ?? await readSecret(`API token for ${rest[0]}: `);
+				if (!token) throw new Error("No token given.");
+				const remote = new RemoteBackend(rest[0], token);
+				const identity = await remote.whoami();
+				saveLogin({ server: remote.webUrl, token });
+				console.log(`Signed in to ${remote.webUrl} as ${identity.principal.name} (${identity.principal.scope}); saved in ${configFile()}.`);
+				return 0;
+			}
+			case "logout": {
+				const saved = readLogin();
+				console.log(removeLogin() ? `Forgot the login for ${saved?.server}.` : "Not signed in.");
+				return 0;
+			}
+			case "whoami": {
+				const api = getBackend();
+				const identity = await api.whoami();
+				const where = api instanceof LocalBackend ? `local data directory ${api.store.home}` : api.webUrl;
+				if (options.json) json({ target: where, ...identity });
+				else console.log(`${where}: ${identity.principal.name} (${identity.principal.scope}), benchboard ${identity.version}, schema ${identity.schemaVersion}`);
+				return 0;
+			}
+			case "serve":
+				return await serve(localOnly(), { host: options.host, port: options.port, auth: options.auth, publicUrl: options["public-url"] }, options.open ?? false);
+			case "token": {
+				const [action, argument] = rest;
+				const local = localOnly();
+				if (action === "create") {
+					if (!argument) throw new Error("Usage: benchboard token create <name> [--scope read|write|admin]");
+					const { token, record } = createToken(local, argument, parseScope(options.scope ?? "write"));
+					if (options.json) json({ token, ...record });
+					else {
+						console.error(`Created ${record.scope} token "${record.name}" (id ${record.id}). It is shown only once:`);
+						console.log(token);
+					}
+					return 0;
+				}
+				if (action === "list") {
+					const tokens = listTokens(local, { includeRevoked: options.all });
+					if (options.json) json(tokens);
+					else for (const entry of tokens) {
+						console.log(`${entry.id}\t${entry.name}\t${entry.scope}\t${entry.prefix}…\tcreated ${entry.createdAt}\tlast used ${entry.lastUsedAt ?? "never"}${entry.revokedAt ? `\trevoked ${entry.revokedAt}` : ""}`);
+					}
+					return 0;
+				}
+				if (action === "revoke") {
+					if (!argument) throw new Error("Usage: benchboard token revoke <id|name>");
+					if (!revokeToken(local, argument)) throw new Error(`No active token ${argument}.`);
+					console.log(`Revoked ${argument}.`);
+					return 0;
+				}
+				throw new Error("Usage: benchboard token <create|list|revoke> ...");
+			}
+			case "backup": {
+				if (rest.length !== 1) throw new Error("Usage: benchboard backup <directory>");
+				const result = backup(localOnly(), rest[0]);
+				if (options.json) json(result);
+				else console.log(`Backed up ${localOnly().home} to ${result.directory}: database plus ${result.copied} new files (${result.skipped} already present), ${(result.bytes / 1024 / 1024).toFixed(1)} MiB written.`);
+				return 0;
+			}
+			case "verify": {
+				const result = verify(localOnly());
+				if (options.json) json(result);
+				else {
+					console.log(`${result.ok ? "OK" : "PROBLEMS FOUND"}: schema ${result.schemaVersion}, ${result.counts.runs} runs, ${result.counts.measurements} measurements, ` +
+						`${result.counts.profiles} profiles, ${result.counts.pullRequests} pull requests.`);
+					if (result.integrity.join() !== "ok") console.log(`integrity_check: ${result.integrity.join("; ")}`);
+					if (result.foreignKeyViolations) console.log(`${result.foreignKeyViolations} foreign key violations`);
+					for (const file of result.missingExports) console.log(`missing export ${file}`);
+					for (const file of result.missingProfiles) console.log(`missing profile file ${file}`);
+				}
+				return result.ok ? 0 : 1;
+			}
+			case "healthcheck": {
+				const port = Number(options.port ?? process.env.BENCHBOARD_PORT ?? DEFAULT_PORT);
+				const ok = await reachable(port);
+				if (!ok) console.error(`benchboard: no healthy server on port ${port}.`);
+				return ok ? 0 : 1;
 			}
 			default:
 				throw new Error(`Unknown command "${command}". Run benchboard --help.`);
@@ -430,6 +575,6 @@ export async function main(argv: string[]): Promise<number> {
 		console.error(`benchboard: ${(error as Error).message}`);
 		return 1;
 	} finally {
-		store.close();
+		store?.close();
 	}
 }

@@ -1,51 +1,10 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
-import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, test } from "bun:test";
-import { fileURLToPath } from "node:url";
-
-// node:test-style cleanup registration on top of bun:test.
-const cleanups: (() => void)[] = [];
-afterEach(() => { while (cleanups.length) cleanups.pop()!(); });
-const t = { after: (fn: () => void) => { cleanups.push(fn); } };
-
+import { test } from "bun:test";
+import { series, setup, startServer, t } from "./helpers.ts";
 import { syntheticProfile } from "../../core/test/synthetic-profile.ts";
-
-const bin = fileURLToPath(new URL("../bin/benchboard.ts", import.meta.url));
-
-function setup(t: { after: (fn: () => void) => void }) {
-	const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "benchboard-cli-")));
-	t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-	const repo = path.join(root, "repo");
-	const home = path.join(root, "home");
-	fs.mkdirSync(repo);
-	const env = {
-		...process.env, BENCHBOARD_HOME: home,
-		GIT_AUTHOR_NAME: "T", GIT_AUTHOR_EMAIL: "t@e", GIT_COMMITTER_NAME: "T", GIT_COMMITTER_EMAIL: "t@e",
-	};
-	const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8", env }).trim();
-	git("init", "-q", "-b", "main");
-	fs.writeFileSync(path.join(repo, "src"), "0");
-	git("add", ".");
-	git("commit", "-qm", "base");
-	git("checkout", "-qb", "topic");
-	fs.writeFileSync(path.join(repo, "src"), "1");
-	git("commit", "-qam", "make it slower");
-	const cli = (...args: string[]): { code: number; stdout: string; stderr: string } => {
-		try {
-			return { code: 0, stdout: execFileSync(process.execPath, [bin, ...args], { cwd: repo, env, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }), stderr: "" };
-		} catch (error) {
-			const failure = error as { status: number; stdout: string; stderr: string };
-			return { code: failure.status, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" };
-		}
-	};
-	return { root, repo, home, env, git, cli };
-}
-
-const series = (center: number, n = 20) => Array.from({ length: n }, (_, i) => center * (1 + ((i * 7919) % 13 - 6) / 600));
 
 test("CLI: ingest a base/head sweep, track the branch and report", () => {
 	const { root, git, cli } = setup(t);
@@ -90,13 +49,7 @@ test("CLI: ingest a base/head sweep, track the branch and report", () => {
 test("CLI: serve exposes GraphQL on localhost only", async () => {
 	const { cli, env, repo } = setup(t);
 	assert.equal(cli("pr", "track", "--branch", "--base", "main").code, 0);
-	const port = 43000 + Math.floor(Math.random() * 1000);
-	const server = spawn(process.execPath, [bin, "serve", "--port", String(port)], { cwd: repo, env, stdio: ["ignore", "ignore", "pipe"] });
-	t.after(() => server.kill());
-	await new Promise<void>((resolve, reject) => {
-		server.stderr.on("data", (chunk: Buffer) => chunk.toString().includes("serving") && resolve());
-		server.once("exit", (code) => reject(new Error(`server exited with ${code}`)));
-	});
+	const { port } = await startServer(t, env, repo);
 	const response = await fetch(`http://127.0.0.1:${port}/graphql`, {
 		method: "POST", headers: { "content-type": "application/json" },
 		body: JSON.stringify({ query: "{ repositories { name pullRequests { headRef commits { subject } } } }" }),
@@ -121,14 +74,14 @@ test("CLI: serve exposes GraphQL on localhost only", async () => {
 	assert.equal(preflight.status, 403);
 	const session = await fetch(`http://127.0.0.1:${port}/api/session`, { headers: { origin: "https://untrusted.example" } });
 	assert.equal(session.status, 403);
-	// Same-origin requests still need the session token to mutate.
+	// Same-origin browser requests still need the CSRF token to mutate.
 	const anonymous = await (await fetch(`http://127.0.0.1:${port}/graphql`, {
 		method: "POST", headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` }, body: mutation,
 	})).json() as { errors: { message: string }[] };
-	assert.match(anonymous.errors[0].message, /session token/);
-	const { token } = await (await fetch(`http://127.0.0.1:${port}/api/session`)).json() as { token: string };
+	assert.match(anonymous.errors[0].message, /needs admin access; local has read access/);
+	const { csrf } = await (await fetch(`http://127.0.0.1:${port}/api/session`)).json() as { csrf: string };
 	const authorized = await (await fetch(`http://127.0.0.1:${port}/graphql`, {
-		method: "POST", headers: { "content-type": "application/json", "x-benchboard-token": token }, body: mutation,
+		method: "POST", headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}`, "x-benchboard-csrf": csrf }, body: mutation,
 	})).json() as { data: { deleteRun: boolean } };
 	assert.deepEqual(authorized.data, { deleteRun: false });
 });

@@ -17,6 +17,7 @@ import { Command } from "@/components/kit/onboarding";
 import { MicroLabel, Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
 import { IntervalGlyph, Pill, SegmentedBar, Segmented, Sparkline, Ticks, verdictText, verdictVar, type Tick } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
+import { allows, useSession } from "@/lib/session";
 import { percentFromRatio, referenceName, relativeTime, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { PullRequestReportQuery as ReportResult, Statistic, Verdict } from "@/gql/graphql";
@@ -28,7 +29,8 @@ type Filter = "all" | "changed" | "regressions" | "improvements" | "profiled";
 type View = "list" | "matrix" | "chart";
 
 // Columns collapse with the panel's width (container queries): trend and interval appear when there is room.
-const ROW_GRID = "grid-cols-[minmax(7rem,1fr)_auto_4rem_1rem] @md:grid-cols-[minmax(7rem,1fr)_auto_6rem_4rem_1rem] @xl:grid-cols-[minmax(8rem,1fr)_auto_5rem_7rem_4rem_1rem]";
+// The ticks column is at least as wide as its "Commits" header, so header and rows align for short PRs too.
+const ROW_GRID = "grid-cols-[minmax(7rem,1fr)_minmax(3.5rem,auto)_4rem_1rem] @md:grid-cols-[minmax(7rem,1fr)_minmax(3.5rem,auto)_6rem_4rem_1rem] @xl:grid-cols-[minmax(8rem,1fr)_minmax(3.5rem,auto)_5rem_7rem_4rem_1rem]";
 
 const value = (statistic: Statistic, m: { mean: number; median: number }) => statistic === "MEAN" ? m.mean : m.median;
 
@@ -213,6 +215,8 @@ export function PullRequestPage() {
 
   const query = useGraphQL(PullRequestReportQuery, { id, statistic, includeDirty, machine, threshold }, { placeholderData: (previous) => previous });
   const sync = useGraphQLMutation(SyncPullRequestMutation);
+  const session = useSession().data;
+  const canWrite = allows(session, "write");
   const pr = query.data?.pullRequest;
   const report = pr?.report;
   useRepositoryScope(pr?.repository.id);
@@ -329,11 +333,21 @@ export function PullRequestPage() {
         </div>
         <div className="flex gap-2">
           {pr.url && <Button variant="outline" size="sm" asChild><a href={pr.url} target="_blank" rel="noreferrer"><ExternalLink /> GitHub</a></Button>}
-          <Button variant="outline" size="sm" disabled={sync.isPending} onClick={() => sync.mutate({ id: pr.id }, {
-            onSuccess: () => toast.success("Pull request synced"), onError: (error) => toast.error(error.message),
-          })}>
-            <RefreshCw className={cn(sync.isPending && "animate-spin")} /> Sync
-          </Button>
+          {canWrite && (pr.source === "GITHUB" || session?.auth === "none" ? (
+            <Button variant="outline" size="sm" disabled={sync.isPending} onClick={() => sync.mutate({ id: pr.id }, {
+              onSuccess: () => toast.success("Pull request synced"), onError: (error) => toast.error(error.message),
+            })}>
+              <RefreshCw className={cn(sync.isPending && "animate-spin")} /> Sync
+            </Button>
+          ) : (
+            // A server has no checkout of local branches; they are synced from one with the CLI.
+            <Button variant="outline" size="sm" onClick={() => {
+              void navigator.clipboard?.writeText(`benchboard pr sync ${pr.headRef}`);
+              toast.info(`Local branches sync from a checkout: benchboard pr sync ${pr.headRef} (copied)`);
+            }}>
+              <Terminal /> Sync from checkout
+            </Button>
+          ))}
         </div>
       </div>
 
@@ -463,7 +477,7 @@ export function PullRequestPage() {
             {view === "list" && (
               <div className="@container px-2 pb-2" data-series-list role="group" aria-label="Series">
                 <div className={cn("text-muted-foreground grid gap-3 px-3 pb-1.5 text-xs whitespace-nowrap", ROW_GRID)}>
-                  <span>Series</span><span style={{ width: columns.length * 9 - 3 }}>Commits</span><span className="hidden @xl:block">Trend</span>
+                  <span>Series</span><span style={{ width: Math.max(56, columns.length * 9 - 3) }}>Commits</span><span className="hidden @xl:block">Trend</span>
                   <span className="hidden @md:block">{focusPosition !== null ? "Step · 95% CI" : "Head · 95% CI"}</span>
                   <span className="text-right">{focusPosition !== null ? `Δ at #${focusPosition}` : "Δ head"}</span><span />
                 </div>

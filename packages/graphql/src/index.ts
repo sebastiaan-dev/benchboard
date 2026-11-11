@@ -2,19 +2,21 @@ import { readFileSync } from "node:fs";
 import { makeExecutableSchema } from "@graphql-tools/schema";
 import { GraphQLScalarType, Kind, type GraphQLSchema, type ValueNode } from "graphql";
 import {
-	compare, diffFunctions, functionStats, metricTotal, pullRequestReport, type Comparison, type Metric, type Profile,
+	allows, compare, diffFunctions, functionStats, metricTotal, pullRequestReport, type Comparison, type Metric, type Profile, type Scope,
 } from "@benchboard/core";
-import { createContext, type Context } from "./context.ts";
+import { createContext, localLinks, type Context, type Links } from "./context.ts";
 import type { Resolvers } from "./generated/resolvers.ts";
 import type { CaseParent, PointParent, SeriesParent } from "./mappers.ts";
 
-export { createContext, type Context };
+export { createContext, localLinks, type Context, type Links };
 
 export const typeDefs = readFileSync(new URL("../schema.graphql", import.meta.url), "utf8");
 
-function authorize(context: Context) {
-	if (!context.mayMutate) {
-		throw new Error("Mutations require the server session token (sent automatically by the Benchboard web app).");
+function authorize(context: Context, scope: Scope = "write") {
+	if (!allows(context.principal?.scope ?? null, scope)) {
+		throw new Error(context.principal
+			? `This needs ${scope} access; ${context.principal.name} has ${context.principal.scope} access.`
+			: `This needs ${scope} access; sign in with an API token.`);
 	}
 }
 
@@ -84,11 +86,11 @@ export const resolvers: Resolvers = {
 			return context.store.syncGithubPullRequest({ repositoryId: id(args.repository), reference: args.reference });
 		},
 		deleteRun: (_, args, context) => {
-			authorize(context);
+			authorize(context, "admin");
 			return context.store.deleteRun(String(args.id));
 		},
 		deleteProfile: (_, args, context) => {
-			authorize(context);
+			authorize(context, "admin");
 			return context.store.deleteProfile(id(args.id));
 		},
 	},
@@ -113,11 +115,10 @@ export const resolvers: Resolvers = {
 		})),
 		hasSymbols: (profile) => profile.symsSha256 !== null,
 		rawPath: (profile) => `/profiles/${profile.id}/profile.json.gz`,
-		firefoxProfilerUrl: (profile, args) => {
-			const origin = args.origin.replace(/\/+$/, "");
-			if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(origin)) throw new Error("origin must be a local http(s) URL.");
-			const raw = encodeURIComponent(`${origin}/profiles/${profile.id}/profile.json.gz`);
-			const symbols = encodeURIComponent(`${origin}/profiles/${profile.id}/symbols`);
+		firefoxProfilerUrl: (profile, _, { links }) => {
+			const base = links.profileBase(profile.id);
+			const raw = encodeURIComponent(`${base}/profile.json.gz`);
+			const symbols = encodeURIComponent(`${base}/symbols`);
 			return `https://profiler.firefox.com/from-url/${raw}/calltree/?symbolServer=${symbols}`;
 		},
 		tree: (profile, _, { store }) => store.profileTree(profile.id),

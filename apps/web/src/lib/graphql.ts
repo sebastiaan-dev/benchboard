@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient, type UseQueryOptions } from "@tanstack/react-query";
 import type { TypedDocumentString } from "@/gql/graphql";
+import { loadSession } from "@/lib/session";
 
 export class GraphQLRequestError extends Error {
   readonly errors: { message: string; path?: (string | number)[] }[];
@@ -9,19 +10,8 @@ export class GraphQLRequestError extends Error {
   }
 }
 
-let session: Promise<string> | null = null;
-
-/** The server's per-process token authorizes mutations; it is only readable same-origin. */
-function sessionToken(): Promise<string> {
-  session ??= fetch("/api/session").then(async (response) => {
-    if (!response.ok) throw new Error(`Could not start a session (HTTP ${response.status}).`);
-    return ((await response.json()) as { token: string }).token;
-  }).catch((error) => {
-    session = null;
-    throw error;
-  });
-  return session;
-}
+/** The server needs credentials this browser does not have (signed out, or a revoked token). */
+export class AuthenticationError extends Error {}
 
 export async function request<TResult, TVariables>(
   document: TypedDocumentString<TResult, TVariables>,
@@ -31,10 +21,11 @@ export async function request<TResult, TVariables>(
     method: "POST",
     headers: {
       "content-type": "application/json", accept: "application/graphql-response+json, application/json",
-      "x-benchboard-token": await sessionToken(),
+      "x-benchboard-csrf": (await loadSession()).csrf,
     },
     body: JSON.stringify({ query: document.toString(), variables }),
   });
+  if (response.status === 401) throw new AuthenticationError("Sign in to see this server's benchmarks.");
   const body = (await response.json().catch(() => null)) as { data?: TResult; errors?: { message: string }[] } | null;
   if (!body) throw new Error(`GraphQL request failed with HTTP ${response.status}.`);
   if (body.errors?.length) throw new GraphQLRequestError(body.errors);

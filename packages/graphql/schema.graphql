@@ -24,7 +24,9 @@ type Mutation {
   syncPullRequest(id: ID!): PullRequest!
   "Starts tracking a GitHub pull request: `123`, `owner/name#123` or a URL."
   trackGithubPullRequest(repository: ID!, reference: String!): PullRequest!
+  "Requires admin access."
   deleteRun(id: ID!): Boolean!
+  "Requires admin access."
   deleteProfile(id: ID!): Boolean!
 }
 
@@ -343,8 +345,8 @@ type Profile {
   hasSymbols: Boolean!
   "Raw profile download (gzip JSON)."
   rawPath: String!
-  "Opens the raw profile in the Firefox Profiler, symbolicated by this server."
-  firefoxProfilerUrl(origin: String!): String!
+  "Opens the raw profile in the Firefox Profiler, symbolicated by this server (signed, expiring links when the server requires authentication)."
+  firefoxProfilerUrl: String!
   "Aggregated call tree (see @benchboard/core CallTree)."
   tree: JSON!
   topFunctions(limit: Int = 50, by: ProfileSort = SELF, metric: ProfileMetric = CPU): [ProfileFunction!]!

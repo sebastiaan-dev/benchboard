@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { createPortal } from "react-dom";
 import { Link, useLocation, useNavigate } from "react-router";
 import {
-  Activity, ChevronsUpDown, Home, Flame, FolderGit2, GitBranch, GitPullRequest, Layers, LayoutDashboard, ListChecks, Moon, Search, Sun, Workflow,
+  Activity, ChevronsUpDown, Home, KeyRound, LogOut, UserRound, Flame, FolderGit2, GitBranch, GitPullRequest, Layers, LayoutDashboard, ListChecks, Moon, Search, Sun, Workflow,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { graphql } from "@/gql";
@@ -16,6 +16,7 @@ import { Kbd } from "@/components/ui/kbd";
 import { Separator } from "@/components/ui/separator";
 import { StatusDot, verdictVar } from "@/components/kit/encodings";
 import { useGraphQL } from "@/lib/graphql";
+import { useSession, useSessionActions } from "@/lib/session";
 import { relativeTime, seriesName } from "@/lib/format";
 
 const ShellQuery = graphql(`
@@ -111,6 +112,40 @@ function ThemeToggle() {
     <SidebarMenuButton onClick={() => setTheme(dark ? "light" : "dark")} tooltip="Toggle theme">
       {dark ? <Sun /> : <Moon />} <span>{dark ? "Light mode" : "Dark mode"}</span>
     </SidebarMenuButton>
+  );
+}
+
+/** Who is signed in, on servers with authentication; nothing on a local server. */
+function SessionMenu() {
+  const session = useSession().data;
+  const { signOut } = useSessionActions();
+  const navigate = useNavigate();
+  if (!session || session.auth === "none") return null;
+  if (!session.principal || session.principal.name === "anonymous") {
+    return (
+      <SidebarMenuItem>
+        <SidebarMenuButton onClick={() => navigate("/sign-in")} tooltip="Sign in"><KeyRound /> <span>Sign in</span></SidebarMenuButton>
+      </SidebarMenuItem>
+    );
+  }
+  const { name, scope } = session.principal;
+  return (
+    <SidebarMenuItem>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <SidebarMenuButton tooltip={`${name} (${scope})`}>
+            <UserRound /> <span className="truncate">{name}</span>
+            <span className="text-muted-foreground ml-auto font-mono text-[10.5px]">{scope}</span>
+          </SidebarMenuButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent side="top" align="start" className="w-56">
+          <DropdownMenuLabel className="text-muted-foreground text-xs font-normal">
+            Signed in with token “{name}” · {scope === "read" ? "read only" : scope === "write" ? "read and write" : "full access"}
+          </DropdownMenuLabel>
+          <DropdownMenuItem onSelect={() => void signOut()}><LogOut /> Sign out</DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </SidebarMenuItem>
   );
 }
 
@@ -338,6 +373,7 @@ export function AppShell({ children }: { children: ReactNode }) {
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem><ThemeToggle /></SidebarMenuItem>
+              <SessionMenu />
             </SidebarMenu>
           </SidebarFooter>
         </Sidebar>

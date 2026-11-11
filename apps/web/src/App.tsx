@@ -1,7 +1,9 @@
 import { lazy, Suspense } from "react";
 import { Route, Routes } from "react-router";
 import { AppShell } from "@/components/shell";
-import { LoadingState, NotFound } from "@/components/bench/states";
+import { ErrorState, LoadingState, NotFound } from "@/components/bench/states";
+import { SignInPage } from "@/pages/sign-in";
+import { useSession } from "@/lib/session";
 
 // Pages are split so the charting code only loads where it is used.
 const page = <K extends string>(load: () => Promise<Record<K, React.ComponentType>>, name: K) =>
@@ -20,6 +22,21 @@ const ProfileComparePage = page(() => import("@/pages/profile-compare"), "Profil
 const HomePage = page(() => import("@/pages/home"), "HomePage");
 
 export function App() {
+  const session = useSession();
+  if (session.isPending) return null;
+  if (session.error) return <div className="p-6"><ErrorState error={session.error} /></div>;
+  const { auth, principal, publicRead } = session.data;
+  // Servers that need a token show nothing until signed in (unless they allow anonymous reading).
+  if (auth === "token" && !principal && !publicRead) return <SignInPage />;
+  return (
+    <Routes>
+      <Route path="/sign-in" element={<SignInPage redirect />} />
+      <Route path="*" element={<Pages />} />
+    </Routes>
+  );
+}
+
+function Pages() {
   return (
     <AppShell>
       <Suspense fallback={<LoadingState rows={1} />}>

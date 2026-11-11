@@ -171,7 +171,9 @@ export type MeasurementStatus =
 
 export type Mutation = {
   __typename?: 'Mutation';
+  /** Requires admin access. */
   deleteProfile: Scalars['Boolean']['output'];
+  /** Requires admin access. */
   deleteRun: Scalars['Boolean']['output'];
   /** Fetches the latest commits of a tracked pull request or branch (via gh or git). */
   syncPullRequest: PullRequest;
@@ -220,7 +222,7 @@ export type Profile = {
   cpuMs: Scalars['Float']['output'];
   cpuSource: CpuSource;
   durationMs?: Maybe<Scalars['Float']['output']>;
-  /** Opens the raw profile in the Firefox Profiler, symbolicated by this server. */
+  /** Opens the raw profile in the Firefox Profiler, symbolicated by this server (signed, expiring links when the server requires authentication). */
   firefoxProfilerUrl: Scalars['String']['output'];
   hasSymbols: Scalars['Boolean']['output'];
   id: Scalars['ID']['output'];
@@ -247,12 +249,6 @@ export type Profile = {
   topFunctions: Array<ProfileFunction>;
   /** Aggregated call tree (see @benchboard/core CallTree). */
   tree: Scalars['JSON']['output'];
-};
-
-
-/** A sampled CPU profile (samply / Firefox Profiler processed format) attached to a measurement. */
-export type ProfileFirefoxProfilerUrlArgs = {
-  origin: Scalars['String']['input'];
 };
 
 
@@ -916,7 +912,7 @@ export type ProfileResolvers<ContextType = Context, ParentType extends Resolvers
   cpuMs?: Resolver<ResolversTypes['Float'], ParentType, ContextType>;
   cpuSource?: Resolver<ResolversTypes['CpuSource'], ParentType, ContextType>;
   durationMs?: Resolver<Maybe<ResolversTypes['Float']>, ParentType, ContextType>;
-  firefoxProfilerUrl?: Resolver<ResolversTypes['String'], ParentType, ContextType, RequireFields<ProfileFirefoxProfilerUrlArgs, 'origin'>>;
+  firefoxProfilerUrl?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   hasSymbols?: Resolver<ResolversTypes['Boolean'], ParentType, ContextType>;
   id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
   intervalMs?: Resolver<ResolversTypes['Float'], ParentType, ContextType>;

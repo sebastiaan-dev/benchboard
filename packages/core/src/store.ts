@@ -2,16 +2,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createHash, randomBytes } from "node:crypto";
-import type { Database, SQLQueryBindings } from "bun:sqlite";
+import type { Database } from "bun:sqlite";
 import { openDatabase } from "./db.ts";
-import { parseHyperfineExport, MAX_EXPORT_BYTES, type ExportedCase, type CaseStatus } from "./hyperfine.ts";
-import { parseMetadata, slug, type IngestMetadata, type MachineMetadata, type ProfileMetadata } from "./metadata.ts";
+import { parseHyperfineExport, type ExportedCase, type CaseStatus } from "./hyperfine.ts";
+import { parseMetadata, slug, type IngestMetadata, type MachineMetadata } from "./metadata.ts";
+import { githubRemotes, repositoryIdentity, resolveCommit, type CommitInfo, type RepositoryIdentity } from "./git.ts";
+import { parsePullRequestReference, snapshotGithubPullRequest } from "./github.ts";
 import {
-	FULL_SHA, commitRange, githubRemotes, mergeBase, repositoryIdentity, resolveCommit, workingTree,
-	type CommitInfo, type RepositoryIdentity,
-} from "./git.ts";
-import { fetchCommit, fetchPullRequest, parsePullRequestReference } from "./github.ts";
-import { MAX_PROFILE_BYTES, decodeProfileBytes, parseProfile, type SymsSidecar } from "./profile.ts";
+	parsePreparedProfile, parsePreparedRun, parsePullRequestSnapshot, prepareProfile, prepareRun, snapshotLocalBranch,
+	type IngestInput, type PreparedProfile, type PreparedRun, type ProfileInput, type PullRequestSnapshot,
+} from "./prepare.ts";
+import { decodeProfileBytes, parseProfile, type SymsSidecar } from "./profile.ts";
 import { TREE_VERSION, type CallTree, type CpuSource } from "./profile-tree.ts";
 
 export interface Repository {
@@ -135,21 +136,8 @@ export interface Profile {
 	recordedAt: string;
 }
 
-export interface AttachProfileInput {
+export interface AttachProfileInput extends ProfileInput {
 	measurementId: number;
-	/** samply/Firefox Profiler processed profile, optionally gzip-compressed. */
-	file: string;
-	/** samply `.syms.json` sidecar; defaults to the file next to the profile, if present. */
-	syms?: string | null;
-	iterations?: number;
-	label?: string;
-	command?: string;
-	cwd?: string;
-}
-
-/** samply writes `name.json.gz` next to `name.json.syms.json`. */
-export function sidecarPath(file: string): string {
-	return file.replace(/\.gz$/, "").replace(/(\.json)?$/, ".json.syms.json");
 }
 
 export interface RunQuery {
@@ -161,22 +149,14 @@ export interface RunQuery {
 	search?: string;
 }
 
-export interface IngestInput {
-	/** Hyperfine export path, resolved against cwd. */
-	file: string;
-	/** Checkout used to resolve repository identity and revisions. */
-	cwd: string;
-	metadata?: unknown;
+export interface IngestOptions {
+	/** Record an export that was already ingested. */
 	allowDuplicate?: boolean;
-	/** Overrides for importers; not part of the public metadata contract. */
-	internal?: {
-		recordedAt?: string;
-		legacyId?: string;
-		inferredCommits?: { sha: string | null; dirty: boolean | null }[];
-		repository?: RepositoryIdentity;
-		/** Checkout state at measurement time, when it differs from the importing checkout. */
-		checkout?: { path: string | null; head: string | null; branch: string | null; dirty: boolean | null };
-	};
+	/**
+	 * The run was prepared on another machine (uploaded to a server): its checkout path is kept as
+	 * provenance, but never recorded as this repository's local checkout.
+	 */
+	remote?: boolean;
 }
 export interface IngestResult {
 	run: Run;
@@ -220,32 +200,6 @@ export function defaultHome(): string {
 	if (process.env.BENCHBOARD_HOME) return path.resolve(process.env.BENCHBOARD_HOME);
 	const data = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
 	return path.join(data, "benchboard");
-}
-
-function readBounded(file: string, limit = MAX_EXPORT_BYTES): Buffer {
-	const fd = fs.openSync(file, "r");
-	try {
-		const stat = fs.fstatSync(fd);
-		if (!stat.isFile() || stat.size > limit) throw new Error(`Expected a regular file of at most ${limit / 1024 / 1024} MiB: ${file}`);
-		const bytes = Buffer.alloc(stat.size);
-		let length = 0;
-		while (length < bytes.length) {
-			const read = fs.readSync(fd, bytes, length, bytes.length - length, length);
-			if (!read) break;
-			length += read;
-		}
-		if (length !== stat.size) throw new Error("Export changed while being read; retry after Hyperfine finishes.");
-		return bytes;
-	} finally {
-		fs.closeSync(fd);
-	}
-}
-
-function localMachine(): MachineMetadata {
-	return {
-		hostname: os.hostname(), os: `${os.platform()} ${os.release()}`, arch: os.arch(),
-		cpu: os.cpus()[0]?.model ?? "Unknown", ram: os.totalmem(),
-	};
 }
 
 export function runId(date = new Date()): string {
@@ -374,54 +328,34 @@ export class Store {
 		return mapRow<Benchmark>(this.db.query("SELECT * FROM benchmark WHERE repository_id = ? AND key = ?").get(repositoryId, key));
 	}
 
-	ingest(input: IngestInput): IngestResult {
-		const source = path.resolve(input.cwd, input.file.startsWith("~/") ? path.join(os.homedir(), input.file.slice(2)) : input.file);
-		const bytes = readBounded(source);
+	/** Prepares (reads files, resolves commits in the checkout) and stores a run. */
+	ingest(input: IngestInput & IngestOptions): IngestResult {
+		return this.ingestPrepared(prepareRun(input), input);
+	}
+
+	/** Stores a prepared run. Reads nothing outside the data directory, so prepared runs may come from clients. */
+	ingestPrepared(value: PreparedRun, options: IngestOptions = {}): IngestResult {
+		const prepared = parsePreparedRun(value);
+		const bytes = prepared.export;
 		const cases = parseHyperfineExport(bytes);
-		const meta = parseMetadata(input.metadata);
-		const warnings: string[] = [];
+		const meta = parseMetadata(prepared.metadata);
+		if (meta.cases?.some((entry) => entry.profile !== undefined)) throw new Error("Prepared runs carry profiles separately, not as metadata paths.");
 		if (meta.cases && meta.cases.length !== cases.length) {
 			throw new Error(`Metadata describes ${meta.cases.length} cases but the export has ${cases.length}; keep them in export order.`);
 		}
+		if (prepared.cases.length !== cases.length) throw new Error(`The run attributes ${prepared.cases.length} cases but the export has ${cases.length}.`);
+		if (prepared.profiles.some((profile) => profile.caseIndex >= cases.length)) throw new Error("A profile refers to a case outside the export.");
 		if (meta.baseline !== undefined && meta.baseline > cases.length) throw new Error("Baseline is outside the exported cases.");
+		const warnings = [...prepared.warnings];
 		const sha256 = createHash("sha256").update(bytes).digest("hex");
 		const duplicate = this.db.query("SELECT id FROM run WHERE export_sha256 = ? LIMIT 1").get(sha256) as { id: string } | undefined;
-		if (duplicate && !input.allowDuplicate) {
+		if (duplicate && !options.allowDuplicate) {
 			throw new Error(`This export was already ingested as run ${duplicate.id}; pass allowDuplicate to record it again.`);
 		}
-
-		const identity = input.internal?.repository ?? repositoryIdentity(input.cwd);
-		const root = identity.root;
-		// Importers that supply the historical checkout state skip the (slow, in large trees) live inspection.
-		const tree = root && input.internal?.checkout === undefined ? workingTree(input.cwd) : null;
-		const checkout = input.internal?.checkout !== undefined ? input.internal.checkout
-			: tree && { path: tree.root, head: tree.head, branch: tree.branch, dirty: tree.dirty() };
-		const commits: (CommitInfo | null)[] = [];
-		const resolved = cases.map((_, index) => {
-			const inferred = input.internal?.inferredCommits?.[index];
-			if (inferred) {
-				const info = inferred.sha && root ? resolveCommit(root, inferred.sha) : null;
-				commits.push(info);
-				return { sha: info?.sha ?? inferred.sha, dirty: inferred.dirty, inferred: true };
-			}
-			const caseMeta = meta.cases?.[index];
-			const revision = caseMeta?.commit ?? meta.commit;
-			if (revision) {
-				const info = root ? resolveCommit(root, revision) : null;
-				if (!info && !FULL_SHA.test(revision)) {
-					throw new Error(`Cannot resolve revision "${revision}" in ${input.cwd}; fetch it or pass a full 40-character SHA.`);
-				}
-				commits.push(info);
-				return { sha: info?.sha ?? revision, dirty: caseMeta?.dirty ?? meta.dirty ?? false, inferred: false };
-			}
-			commits.push(tree ? resolveCommit(tree.root, tree.head) : null);
-			return { sha: tree?.head ?? null, dirty: caseMeta?.dirty ?? meta.dirty ?? tree?.dirty() ?? null, inferred: true };
-		});
-		if (!meta.commit && !meta.cases?.some((entry) => entry.commit) && !input.internal?.inferredCommits) {
-			warnings.push(tree
-				? `No commit recorded; attributed all cases to checkout HEAD ${tree.head.slice(0, 12)}${tree.dirty() ? " (dirty)" : ""}.`
-				: "No commit recorded and the working directory is not a git checkout; measurements are not attributable to commits.");
-		}
+		const identity = options.remote ? { ...prepared.repository, root: null } : prepared.repository;
+		const checkout = prepared.checkout;
+		const commits = prepared.commits;
+		const resolved = prepared.cases;
 		const keys = caseKeys(cases, meta, resolved.map((entry) => entry.sha));
 		const seen = new Map<string, number>();
 		keys.forEach((key, index) => {
@@ -431,8 +365,9 @@ export class Store {
 			} else seen.set(signature, index);
 		});
 		const benchmarkKey = meta.benchmark ?? slug(meta.title ?? "default");
-		const recordedAt = input.internal?.recordedAt ?? new Date().toISOString();
+		const recordedAt = prepared.recordedAt ?? new Date().toISOString();
 		const id = runId(new Date(recordedAt));
+		const source = prepared.sourcePath;
 
 		fs.mkdirSync(this.exportsDir(), { recursive: true, mode: 0o700 });
 		const archived = this.exportPath(sha256);
@@ -451,7 +386,7 @@ export class Store {
 				}
 			}
 			const benchmark = this.upsertBenchmark(repository.id, benchmarkKey, meta.title, meta.description);
-			const machineId = this.upsertMachine(meta.machine ?? localMachine());
+			const machineId = this.upsertMachine(prepared.machine);
 			this.db.query(`INSERT INTO run (id, repository_id, machine_id, recorded_at, title, conditions, environment, invocation,
 				warmup, notes, baseline_position, export_sha256, source_path, checkout_path, checkout_head, checkout_branch,
 				checkout_dirty, legacy_id) VALUES (:id, :repository_id, :machine_id, :recorded_at, :title, :conditions,
@@ -462,7 +397,7 @@ export class Store {
 				warmup: meta.warmup ?? null, notes: meta.notes ?? null, baseline_position: meta.baseline ?? null,
 				export_sha256: sha256, source_path: source, checkout_path: checkout?.path ?? null, checkout_head: checkout?.head ?? null,
 				checkout_branch: checkout?.branch ?? null, checkout_dirty: checkout?.dirty == null ? null : Number(checkout.dirty),
-				legacy_id: input.internal?.legacyId ?? null,
+				legacy_id: prepared.legacyId ?? null,
 			});
 			const insert = this.db.query(`INSERT INTO measurement (run_id, position, benchmark_id, case_key, label, command,
 				exported_command, commit_sha, dirty, commit_inferred, revision, build, notes, parameters, status, n, mean, stddev,
@@ -486,28 +421,24 @@ export class Store {
 				});
 			});
 			const measurements = this.runMeasurements(id);
-			cases.forEach((_, index) => {
-				const profiles = meta.cases?.[index]?.profile;
-				for (const profile of profiles === undefined ? [] : Array.isArray(profiles) ? profiles : [profiles]) {
-					const spec: Exclude<ProfileMetadata, string> = typeof profile === "string" ? { file: profile } : profile;
-					this.attachProfile({ ...spec, measurementId: measurements[index].id, cwd: input.cwd });
-				}
-			});
+			for (const { caseIndex, ...profile } of prepared.profiles) this.attachPreparedProfile(measurements[caseIndex].id, profile);
 			this.changed();
 			return { run: this.run(id)!, measurements, benchmark, repository, warnings };
 		});
 	}
 
-	/** Stores a sampled profile for a measurement: raw files content-addressed, plus an aggregated call tree. */
+	/** Reads a profile (and its symbol sidecar) from disk and attaches it to a measurement. */
 	attachProfile(input: AttachProfileInput): Profile {
-		const measurement = this.measurement(input.measurementId);
-		if (!measurement) throw new Error(`Unknown measurement ${input.measurementId}.`);
-		const resolve = (file: string) => path.resolve(input.cwd ?? process.cwd(), file.startsWith("~/") ? path.join(os.homedir(), file.slice(2)) : file);
-		const file = resolve(input.file);
-		const bytes = readBounded(file, MAX_PROFILE_BYTES);
-		const symsFile = input.syms === null ? null : input.syms ? resolve(input.syms) : fs.existsSync(sidecarPath(file)) ? sidecarPath(file) : null;
-		const symsBytes = symsFile ? readBounded(symsFile, MAX_PROFILE_BYTES) : null;
-		const parsed = this.parseProfileFiles(bytes, symsBytes, symsFile);
+		return this.attachPreparedProfile(input.measurementId, prepareProfile(input));
+	}
+
+	/** Stores a sampled profile for a measurement: raw files content-addressed, plus an aggregated call tree. */
+	attachPreparedProfile(measurementId: number, value: PreparedProfile): Profile {
+		const input = parsePreparedProfile(value);
+		const measurement = this.measurement(measurementId);
+		if (!measurement) throw new Error(`Unknown measurement ${measurementId}.`);
+		const { bytes, syms: symsBytes } = input;
+		const parsed = this.parseProfileFiles(bytes, symsBytes, input.symsName);
 		const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
 		const sha256 = digest(bytes);
 		const symsSha256 = symsBytes ? digest(symsBytes) : null;
@@ -660,62 +591,42 @@ export class Store {
 	}
 
 	/** Synchronizes a GitHub pull request's commits; `reference` is `123`, `owner/name#123` or a URL. */
+	/** Fetches a GitHub pull request (via the REST API) and stores it with its commits. */
 	async syncGithubPullRequest(options: { cwd?: string; repositoryId?: number; reference: string | number }): Promise<PullRequest> {
 		const reference = parsePullRequestReference(String(options.reference));
 		const known = options.repositoryId === undefined ? undefined : this.repository(options.repositoryId);
 		const cwd = options.cwd ?? (known?.localPath && fs.existsSync(known.localPath) ? known.localPath : undefined);
-		const identity = cwd ? repositoryIdentity(cwd) : undefined;
-		const candidates = reference.githubRepo ? [reference.githubRepo]
-			: [...new Set([...(cwd ? githubRemotes(cwd) : []), ...(known?.githubRepo ? [known.githubRepo] : [])])];
-		if (!candidates.length) throw new Error("Cannot infer the GitHub repository; pass owner/name#number or a pull request URL.");
-		let pr: Awaited<ReturnType<typeof fetchPullRequest>> | undefined;
-		const errors: string[] = [];
-		for (const githubRepo of candidates) {
-			try {
-				pr = await fetchPullRequest(githubRepo, reference.number);
-				break;
-			} catch (error) { errors.push((error as Error).message); }
-		}
-		if (!pr) throw new Error(errors.join("\n"));
-		const base = pr.baseSha ? (cwd ? resolveCommit(cwd, pr.baseSha) : null) ?? await fetchCommit(pr.githubRepo, pr.baseSha) : null;
-		const fetched = pr;
-		return this.transaction(() => {
-			const repository = identity ? this.upsertRepository(identity) : known ?? this.repositoryByGithub(fetched.githubRepo) ??
-				this.upsertRepository({ slug: `github.com/${fetched.githubRepo}`, name: fetched.githubRepo.split("/")[1], remoteUrl: null, githubRepo: fetched.githubRepo, root: null });
-			return this.storePullRequest(repository.id, {
-				source: "github", githubRepo: fetched.githubRepo, number: fetched.number, title: fetched.title, url: fetched.url,
-				state: fetched.state, author: fetched.author, headRef: fetched.headRef, headSha: fetched.headSha,
-				baseRef: fetched.baseRef, baseSha: fetched.baseSha, updatedAt: fetched.updatedAt,
-			}, base, fetched.commits);
+		const snapshot = await snapshotGithubPullRequest({
+			number: reference.number,
+			candidates: reference.githubRepo ? [reference.githubRepo]
+				: [...new Set([...(cwd ? githubRemotes(cwd) : []), ...(known?.githubRepo ? [known.githubRepo] : [])])],
+			repository: cwd ? repositoryIdentity(cwd) : null,
+			resolveLocal: cwd ? (sha) => resolveCommit(cwd, sha) : undefined,
 		});
+		return this.savePullRequest(snapshot, { repositoryId: known?.id });
 	}
 
 	/** Tracks a local branch like a pull request: commits in `base..head`, oldest first. */
 	syncLocalBranch(options: { cwd: string; head?: string; base?: string; title?: string }): PullRequest {
-		const tree = workingTree(options.cwd);
-		if (!tree) throw new Error(`${options.cwd} is not a git checkout.`);
-		const headRef = options.head ?? tree.branch;
-		if (!headRef) throw new Error("HEAD is detached; pass the branch to track.");
-		const head = resolveCommit(tree.root, headRef);
-		if (!head) throw new Error(`Cannot resolve ${headRef}.`);
-		const candidates = options.base ? [options.base] : ["upstream/HEAD", "origin/HEAD", "upstream/main", "origin/main", "main", "master"];
-		let best: { ref: string; base: string; commits: CommitInfo[] } | undefined;
-		for (const ref of candidates) {
-			if (!resolveCommit(tree.root, ref)) continue;
-			const base = mergeBase(tree.root, ref, head.sha);
-			const commits = commitRange(tree.root, base, head.sha);
-			// The closest base yields the fewest branch-only commits.
-			if (!best || commits.length < best.commits.length) best = { ref, base, commits };
-		}
-		if (!best) throw new Error(options.base ? `Cannot resolve base ${options.base}.` : "Cannot find a base branch; pass one explicitly.");
-		const chosen = best;
-		const identity = repositoryIdentity(tree.root);
+		return this.savePullRequest(snapshotLocalBranch(options));
+	}
+
+	/**
+	 * Stores a pull request snapshot (possibly from a client). The repository is the snapshot's checkout
+	 * identity, else `repositoryId`, else the repository known for the GitHub repo, else a new one.
+	 */
+	savePullRequest(value: PullRequestSnapshot, options: { repositoryId?: number; remote?: boolean } = {}): PullRequest {
+		const snapshot = parsePullRequestSnapshot(value);
+		const pr = snapshot.pullRequest;
 		return this.transaction(() => {
-			const repository = this.upsertRepository(identity);
-			return this.storePullRequest(repository.id, {
-				source: "local", githubRepo: null, number: null, title: options.title ?? headRef, url: null, state: "open",
-				author: head.author, headRef, headSha: head.sha, baseRef: chosen.ref, baseSha: chosen.base, updatedAt: head.committedAt,
-			}, resolveCommit(tree.root, chosen.base), chosen.commits);
+			const identity = snapshot.repository && (options.remote ? { ...snapshot.repository, root: null } : snapshot.repository);
+			const known = options.repositoryId === undefined ? undefined : this.repository(options.repositoryId);
+			const repository = identity ? this.upsertRepository(identity) : known
+				?? (pr.githubRepo ? this.repositoryByGithub(pr.githubRepo) : undefined)
+				?? this.upsertRepository(pr.githubRepo
+					? { slug: `github.com/${pr.githubRepo}`, name: pr.githubRepo.split("/")[1], remoteUrl: null, githubRepo: pr.githubRepo, root: null }
+					: (() => { throw new Error("A local branch snapshot needs its repository identity."); })());
+			return this.storePullRequest(repository.id, pr, snapshot.base, snapshot.commits);
 		});
 	}
 
@@ -726,7 +637,9 @@ export class Store {
 			return this.syncGithubPullRequest({ repositoryId: pr.repositoryId, reference: `${pr.githubRepo}#${pr.number}` });
 		}
 		const repository = this.repository(pr.repositoryId)!;
-		if (!repository.localPath || !fs.existsSync(repository.localPath)) throw new Error("The tracked checkout no longer exists.");
+		if (!repository.localPath || !fs.existsSync(repository.localPath)) {
+			throw new Error(`Local branches are synced from a checkout: run \`benchboard pr sync ${pr.headRef}\` in one.`);
+		}
 		return this.syncLocalBranch({ cwd: repository.localPath, head: pr.headRef, base: pr.baseRef, title: pr.title });
 	}
 
@@ -766,6 +679,11 @@ export class Store {
 		});
 		this.changed();
 		return this.pullRequest(id)!;
+	}
+
+	/** Runs imported from pi /bench, by their original ID. */
+	legacyIds(): string[] {
+		return (this.db.query("SELECT legacy_id FROM run WHERE legacy_id IS NOT NULL").all() as { legacy_id: string }[]).map((row) => row.legacy_id);
 	}
 
 	deleteRun(id: string): boolean {

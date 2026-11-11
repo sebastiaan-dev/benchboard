@@ -157,10 +157,30 @@ const MIGRATIONS: string[] = [
 	ALTER TABLE profile ADD COLUMN cpu_source TEXT NOT NULL DEFAULT 'sample-count';
 	ALTER TABLE profile ADD COLUMN tree_version INTEGER NOT NULL DEFAULT 1;
 	`,
+	`
+	-- API tokens for servers: only a SHA-256 digest is kept; the prefix identifies a token in listings.
+	CREATE TABLE api_token (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL,
+		scope TEXT NOT NULL CHECK (scope IN ('read', 'write', 'admin')),
+		prefix TEXT NOT NULL,
+		hash TEXT NOT NULL UNIQUE,
+		created_at TEXT NOT NULL,
+		last_used_at TEXT,
+		revoked_at TEXT
+	);
+	CREATE UNIQUE INDEX api_token_active_name ON api_token (name) WHERE revoked_at IS NULL;
+	`,
 ];
 
+export const SCHEMA_VERSION = MIGRATIONS.length;
+
 export function openDatabase(file: string): Database {
-	if (file !== ":memory:") fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+	if (file !== ":memory:") {
+		fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+		// The database holds token digests and everything recorded: readable by its owner only.
+		if (!fs.existsSync(file)) fs.closeSync(fs.openSync(file, "a", 0o600));
+	}
 	// strict: named parameters bind from plain object keys (`:name` ↔ { name }).
 	const db = new Database(file, { create: true, strict: true });
 	db.run("PRAGMA busy_timeout = 5000");
@@ -170,6 +190,11 @@ export function openDatabase(file: string): Database {
 	const { user_version: version } = db.query("PRAGMA user_version").get() as { user_version: number };
 	if (version > MIGRATIONS.length) {
 		throw new Error(`Database ${file} has schema version ${version}; this benchboard supports ${MIGRATIONS.length}. Upgrade benchboard.`);
+	}
+	if (version > 0 && version < MIGRATIONS.length && file !== ":memory:") {
+		// Keep a consistent copy of the database as it was before upgrading, so a bad upgrade can be undone.
+		const snapshot = `${file}.v${version}.bak`;
+		if (!fs.existsSync(snapshot)) db.run(`VACUUM INTO '${snapshot.replaceAll("'", "''")}'`);
 	}
 	for (let index = version; index < MIGRATIONS.length; index++) {
 		db.run("BEGIN IMMEDIATE");
