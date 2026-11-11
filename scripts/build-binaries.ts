@@ -40,7 +40,7 @@ fs.writeFileSync(entry, [
 ].join("\n"));
 
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "packages/cli/package.json"), "utf8")) as { version: string };
-const describe = Bun.spawnSync(["git", "describe", "--tags", "--always", "--dirty"], { cwd: root }).stdout.toString().trim();
+const describe = Bun.spawnSync(["git", "describe", "--tags", "--match", "v*", "--always", "--dirty"], { cwd: root }).stdout.toString().trim();
 const version = describe && !describe.startsWith(`v${pkg.version}`) ? `${pkg.version}+${describe}` : describe.replace(/^v/, "") || pkg.version;
 
 fs.mkdirSync(out, { recursive: true });
