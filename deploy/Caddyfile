@@ -1,0 +1,6 @@
+# TLS termination for Benchboard (compose profile "tls"). Caddy obtains certificates automatically;
+# set BENCHBOARD_DOMAIN and BENCHBOARD_PUBLIC_URL=https://$BENCHBOARD_DOMAIN.
+{$BENCHBOARD_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy benchboard:4319
+}

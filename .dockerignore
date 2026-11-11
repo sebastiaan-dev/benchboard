@@ -1,0 +1,10 @@
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+apps/web/src/gql
+docs/design/references
+docs/design/screenshots
+.git
+.DS_Store
+mise.toml
+backups

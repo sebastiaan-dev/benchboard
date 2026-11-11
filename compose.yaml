@@ -1,0 +1,66 @@
+# Benchboard server. Quick start (see docs/deployment.md):
+#   docker compose up -d --build
+#   docker compose exec benchboard benchboard token create admin --scope admin
+# With TLS via Caddy:  BENCHBOARD_DOMAIN=bench.example.com docker compose --profile tls up -d
+# Periodic backups:    docker compose --profile backup up -d
+name: benchboard
+
+x-image: &image
+  image: ${BENCHBOARD_IMAGE:-benchboard:latest}
+
+services:
+  benchboard:
+    <<: *image
+    build: .
+    restart: unless-stopped
+    init: true
+    environment:
+      # The URL people and tools use; required behind a proxy (links, cookies, allowed hosts).
+      BENCHBOARD_PUBLIC_URL: ${BENCHBOARD_PUBLIC_URL:-http://localhost:4319}
+      # Let visitors read without signing in (writes always need a token).
+      BENCHBOARD_PUBLIC_READ: ${BENCHBOARD_PUBLIC_READ:-0}
+      # For tracking and syncing GitHub pull requests from the web app (private repositories, rate limits).
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+    ports:
+      # Published on loopback only; put a TLS proxy in front (the tls profile) to expose it.
+      - "${BENCHBOARD_BIND:-127.0.0.1}:${BENCHBOARD_HOST_PORT:-4319}:4319"
+    volumes:
+      - benchboard-data:/data
+    stop_grace_period: 30s
+
+  caddy:
+    image: caddy:2
+    profiles: [tls]
+    restart: unless-stopped
+    depends_on: [benchboard]
+    environment:
+      BENCHBOARD_DOMAIN: ${BENCHBOARD_DOMAIN:-}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+  # Every BENCHBOARD_BACKUP_INTERVAL seconds, refreshes a consistent copy of the data in /backups/latest
+  # (database snapshot plus new files only). Back that directory up off-site (restic, borg, rsync).
+  backup:
+    <<: *image
+    profiles: [backup]
+    restart: unless-stopped
+    init: true
+    depends_on: [benchboard]
+    entrypoint: ["/bin/sh", "-c", "while :; do benchboard backup /backups/latest && benchboard verify --home /backups/latest || echo 'benchboard backup failed' >&2; sleep \"$${BENCHBOARD_BACKUP_INTERVAL:-21600}\"; done"]
+    environment:
+      BENCHBOARD_BACKUP_INTERVAL: ${BENCHBOARD_BACKUP_INTERVAL:-21600}
+    volumes:
+      - benchboard-data:/data
+      # A named volume by default; set BENCHBOARD_BACKUP_DIR to a host path (owned by uid 1000) to bind-mount one.
+      - ${BENCHBOARD_BACKUP_DIR:-benchboard-backups}:/backups
+    healthcheck:
+      disable: true
+
+volumes:
+  benchboard-data:
+  benchboard-backups:
+  caddy-data:
+  caddy-config:
