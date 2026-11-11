@@ -12,16 +12,23 @@ import { afterAll, beforeAll, test } from "bun:test";
 import { chromium, type Browser, type Page } from "playwright-core";
 
 const root = path.resolve(import.meta.dir, "..");
-const chrome = process.env.CHROME ?? (() => {
-	const cache = path.join(os.homedir(), "Library/Caches/ms-playwright");
-	if (!fs.existsSync(cache)) return undefined;
-	for (const dir of fs.readdirSync(cache).filter((name) => name.startsWith("chromium-")).sort().reverse()) {
-		const candidate = path.join(cache, dir, "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing");
-		if (fs.existsSync(candidate)) return candidate;
+/** CHROME, else the browser matching playwright-core, else any Chrome for Testing in the Playwright cache. */
+const chrome = (() => {
+	if (process.env.CHROME) return process.env.CHROME;
+	const bundled = (() => { try { return chromium.executablePath(); } catch { return undefined; } })();
+	if (bundled && fs.existsSync(bundled)) return bundled;
+	const caches = [path.join(os.homedir(), "Library/Caches/ms-playwright"), path.join(os.homedir(), ".cache/ms-playwright")];
+	const layouts = ["chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing", "chrome-linux64/chrome", "chrome-linux/chrome"];
+	for (const cache of caches.filter((dir) => fs.existsSync(dir))) {
+		for (const dir of fs.readdirSync(cache).filter((name) => name.startsWith("chromium-")).sort().reverse()) {
+			for (const layout of layouts) if (fs.existsSync(path.join(cache, dir, layout))) return path.join(cache, dir, layout);
+		}
 	}
 	return undefined;
 })();
 const ready = Boolean(chrome) && fs.existsSync(path.join(root, "apps/web/dist/index.html"));
+// In CI a missing browser or build is an error, not a reason to skip.
+if (!ready && process.env.CI) throw new Error(`E2E prerequisites missing: ${chrome ? "" : "no Chrome (set CHROME or install with playwright-core) "}${fs.existsSync(path.join(root, "apps/web/dist/index.html")) ? "" : "no web build"}`);
 
 let home: string;
 let server: ReturnType<typeof spawn>;

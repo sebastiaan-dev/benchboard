@@ -14,12 +14,14 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun test --timeout 60000 packages",
     "check": "bun run typecheck && bun run test && bun run build",
+    "lint": "bun run --filter @benchboard/web lint && oxlint packages e2e scripts",
     "seed:demo": "BENCHBOARD_HOME=${BENCHBOARD_HOME:-/tmp/benchboard-demo} bun scripts/seed-demo.ts",
     "test:e2e": "bun run build && bun test --timeout 120000 e2e"
   },
   "devDependencies": {
     "@benchboard/core": "workspace:*",
     "@types/bun": "^1.4.4",
+    "oxlint": "^1.90.0",
     "playwright-core": "1.59",
     "typescript": "~7.0.2"
   }
