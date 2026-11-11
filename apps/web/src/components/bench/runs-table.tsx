@@ -21,7 +21,7 @@ const GRID = "grid-cols-[minmax(0,1fr)_minmax(0,11rem)_8rem_3.5rem_7rem_6rem]";
 export function RunsTable({ runs, showRepository = false }: { runs: RunRowFragment[]; showRepository?: boolean }) {
   return (
     <div>
-      <div className={`text-muted-foreground grid ${GRID} gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase`}>
+      <div className={`text-muted-foreground grid ${GRID} gap-4 px-3 pb-1.5 text-xs`}>
         <span>Run</span><span>Benchmarks</span><span>Commits</span><span className="text-right">Cases</span><span>Machine</span><span className="text-right">Recorded</span>
       </div>
       {runs.map((run) => {

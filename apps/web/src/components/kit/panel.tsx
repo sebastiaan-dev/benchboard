@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 /** Card surface: hairline border, one step above the canvas. */
 export function Panel({ className, children, id }: { className?: string; children: ReactNode; id?: string }) {
   return (
-    <section id={id} className={cn("bg-card text-card-foreground rounded-2xl border shadow-[0_1px_0_0_oklch(1_0_0/3%)_inset]", className)}>
+    <section id={id} className={cn("bg-card text-card-foreground rounded-2xl border shadow-[0_1px_0_0_oklch(1_0_0/3%)_inset,0_1px_2px_0_oklch(0_0_0/4%)]", className)}>
       {children}
     </section>
   );
@@ -56,15 +56,17 @@ export function MicroLabel({ children, className }: { children: ReactNode; class
   return <div className={cn("text-muted-foreground font-mono text-[10.5px] font-medium tracking-[0.08em] uppercase", className)}>{children}</div>;
 }
 
-export function Stat({ label, value, unit, detail, tone, className }: {
-  label: ReactNode; value: ReactNode; unit?: ReactNode; detail?: ReactNode; tone?: "good" | "bad" | "warn"; className?: string;
+/** Hero numbers stay neutral; a tone adds a small colored marker instead of coloring the number (flohoeller, disarto_max). */
+export function Stat({ label, value, unit, detail, tone, badge, className }: {
+  label: ReactNode; value: ReactNode; unit?: ReactNode; detail?: ReactNode; tone?: "good" | "bad" | "warn"; badge?: ReactNode; className?: string;
 }) {
   return (
     <div className={cn("min-w-0", className)}>
       <MicroLabel>{label}</MicroLabel>
-      <div className={cn("mt-1.5 flex items-baseline gap-1 text-2xl font-semibold tracking-tight tabular-nums",
-        tone === "good" && "text-good", tone === "bad" && "text-bad", tone === "warn" && "text-warn")}>
-        {value}{unit && <span className="text-muted-foreground text-sm font-normal">{unit}</span>}
+      <div className="mt-1.5 flex items-baseline gap-1.5 text-2xl font-medium tracking-tight tabular-nums">
+        {value}{unit && <span className="text-muted-foreground text-[0.55em] font-normal">{unit}</span>}
+        {tone && <span className={cn("size-2 self-center rounded-full", tone === "good" && "bg-[var(--good)]", tone === "bad" && "bg-[var(--bad)]", tone === "warn" && "bg-[var(--warn)]")} />}
+        {badge && <span className="self-center">{badge}</span>}
       </div>
       {detail && <div className="text-muted-foreground mt-1 truncate font-mono text-[11px]">{detail}</div>}
     </div>

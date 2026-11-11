@@ -33,7 +33,7 @@ function Side({ title, profile, metric }: { title: string; profile: ProfileHeade
 
 function Delta({ value }: { value: number }) {
   return (
-    <span className={cn("font-mono text-xs tabular-nums", value > 0 ? "text-bad" : value < 0 ? "text-info" : "text-muted-foreground")}>
+    <span className={cn("font-mono text-xs tabular-nums", value > 0 ? "text-bad" : value < 0 ? "text-good" : "text-muted-foreground")}>
       {value >= 0 ? "+" : ""}{ms(value)}
     </span>
   );
@@ -95,7 +95,7 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
           <Side title="Head" profile={b} metric={metric} />
           <div className="bg-well grid min-w-40 content-start gap-1 rounded-xl border p-3">
             <MicroLabel>{metricLabel(metric)} time change</MicroLabel>
-            <span className={cn("text-2xl font-semibold tracking-tight tabular-nums", total > 1.02 ? "text-bad" : total < 0.98 ? "text-good" : "")}>
+            <span className="text-2xl font-medium tracking-tight tabular-nums">
               {total >= 1 ? "+" : ""}{((total - 1) * 100).toFixed(1)}%
             </span>
             <Delta value={metricMs(b, metric) - metricMs(a, metric)} />
@@ -130,7 +130,7 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
                 <span className="relative h-2.5">
                   <span className="bg-border absolute inset-y-0 left-1/2 w-px" />
                   <span className="absolute inset-y-0 rounded-full"
-                    style={{ background: delta > 0 ? "var(--bad)" : "var(--info)", opacity: 0.7, width, ...(delta > 0 ? { left: "50%" } : { right: "50%" }) }} />
+                    style={{ background: delta > 0 ? "var(--bad)" : "var(--good)", opacity: 0.7, width, ...(delta > 0 ? { left: "50%" } : { right: "50%" }) }} />
                 </span>
                 <span className="block min-w-0 truncate font-mono text-xs" title={`${entry.name}${entry.library ? ` · ${entry.library}` : ""}`}>{entry.name}</span>
                 <span className="text-muted-foreground text-right font-mono text-xs tabular-nums">{ms(entry.baseSelfMs)}</span>

@@ -1,19 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
-import { ArrowLeftRight, ChevronDown, ChevronUp, ExternalLink, Flame, GitBranch, GitCommitHorizontal, GitPullRequest, Layers, RefreshCw, Search } from "lucide-react";
+import { ArrowLeftRight, ChevronDown, ChevronUp, Circle, ExternalLink, Terminal, Flame, GitBranch, GitCommitHorizontal, GitPullRequest, Layers, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
-import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { CommitMatrix, type MatrixColumn, type MatrixRow } from "@/components/bench/commit-matrix";
 import { TimelineChart } from "@/components/bench/timeline-chart";
 import { ProfileDiffView } from "@/components/bench/profile-diff";
 import { SeriesInspector, profilePairFor, scopedComparison, type Scope } from "@/components/bench/series-inspector";
 import { EmptyState, ErrorState, LoadingState, NotFound } from "@/components/bench/states";
-import { Crumbs, useRepositoryScope } from "@/components/shell";
+import { Crumbs, TopBarActions, useRepositoryScope } from "@/components/shell";
+import { Command } from "@/components/kit/onboarding";
 import { MicroLabel, Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
 import { IntervalGlyph, Pill, SegmentedBar, Segmented, Sparkline, Ticks, verdictText, verdictVar, type Tick } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
@@ -114,6 +114,86 @@ function SeriesRow({ series, columns, statistic, threshold, extent, selected, on
   );
 }
 
+/**
+ * One-sentence summary of the PR, in the spirit of the references' insight rows: the overall head
+ * change and the commits that moved the most series, with whether those moves survive at the head.
+ */
+function Narrative({ report, columns, onSelect }: {
+  report: Report; columns: { position: number; label: string; subject: string }[]; onSelect: (position: number) => void;
+}) {
+  const compared = report.series.filter((series) => series.headComparison && series.headComparison.low !== null);
+  if (!compared.length) return null;
+  const geomean = Math.exp(compared.reduce((sum, series) => sum + Math.log(series.headComparison!.ratio), 0) / compared.length);
+  const name = (series: Series) => series.caseKey === "default" ? series.benchmark.key : series.caseKey;
+  const byCommit = new Map<number, { up: Series[]; down: Series[] }>();
+  for (const series of report.series) {
+    for (const point of series.points) {
+      const verdict = point.vsPrevious?.verdict;
+      if (point.spansGap || (verdict !== "REGRESSION" && verdict !== "IMPROVEMENT")) continue;
+      const entry = byCommit.get(point.position) ?? { up: [], down: [] };
+      (verdict === "REGRESSION" ? entry.up : entry.down).push(series);
+      byCommit.set(point.position, entry);
+    }
+  }
+  const pick = (kind: "up" | "down") => [...byCommit].filter(([, entry]) => entry[kind].length)
+    .sort((a, b) => b[1][kind].length - a[1][kind].length || a[0] - b[0])[0];
+  const worst = pick("up");
+  const best = pick("down");
+  const commit = (position: number) => {
+    const column = columns.find((entry) => entry.position === position);
+    return (
+      <button type="button" onClick={() => onSelect(position)} className="hover:text-foreground font-medium underline decoration-dotted underline-offset-4">
+        #{position} {column?.label}{column?.subject ? ` “${column.subject.length > 48 ? `${column.subject.slice(0, 47)}…` : column.subject}”` : ""}
+      </button>
+    );
+  };
+  const regressedAtHead = (list: Series[]) => list.filter((series) => series.verdict === "REGRESSION").length;
+  return (
+    <p className="text-muted-foreground px-4 pb-3 text-sm leading-6">
+      <span className="text-foreground">Head is {Math.abs((geomean - 1) * 100).toFixed(1)}% {geomean <= 1 ? "faster" : "slower"}</span> across {compared.length} series (geometric mean).
+      {best && <> Biggest improvement: {commit(best[0])} sped up {best[1].down.length} series ({best[1].down.slice(0, 3).map(name).join(", ")}{best[1].down.length > 3 ? ", …" : ""}).</>}
+      {worst && <> {commit(worst[0])} slowed {worst[1].up.length} series ({worst[1].up.slice(0, 3).map(name).join(", ")}{worst[1].up.length > 3 ? ", …" : ""}){
+        regressedAtHead(worst[1].up) ? <span className="text-bad">; {regressedAtHead(worst[1].up)} still regressed at head</span> : "; none regressed at head"}.</>}
+    </p>
+  );
+}
+
+/** A PR without measurements: what to run for each commit, instead of an empty report. */
+function MeasurePullRequest({ columns }: { columns: { position: number; label: string; subject: string; sha: string; isBase: boolean }[] }) {
+  const base = columns.find((column) => column.isBase);
+  const head = columns.at(-1);
+  const meta = JSON.stringify({
+    benchmark: "tpch/sf1",
+    cases: [base, head].filter(Boolean).map((column) => ({ case: "q1", commit: column!.sha.slice(0, 12), dirty: false })),
+  }, null, 2);
+  return (
+    <div className="grid items-start gap-5 xl:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)]">
+      <Panel>
+        <PanelHeader icon={GitCommitHorizontal} title="No measurements yet" subtitle={`${columns.length} commits to measure · start with the base and the head`} />
+        <div className="space-y-3 px-4 pb-4">
+          {columns.map((column) => (
+            <div key={column.position} className="grid grid-cols-[1.25rem_4.5rem_1fr] items-start gap-3">
+              <Circle className="text-muted-foreground mt-1 size-3.5" />
+              <span className="pt-0.5 font-mono text-xs">{column.isBase ? "base" : `#${column.position}`} {column.sha.slice(0, 7)}</span>
+              <span className="text-muted-foreground truncate pt-0.5 text-xs">{column.subject}</span>
+            </div>
+          ))}
+        </div>
+      </Panel>
+      <Panel>
+        <PanelHeader icon={Terminal} title="Measure base and head together" subtitle="One Hyperfine invocation; each case is attributed to its commit" />
+        <div className="space-y-3 px-4 pb-4 text-sm">
+          <Command>{`hyperfine --export-json q1.json './build-${base?.sha.slice(0, 7) ?? "base"}/bin q1' './build-${head?.sha.slice(0, 7) ?? "head"}/bin q1'`}</Command>
+          <p className="text-muted-foreground">with <code className="font-mono text-xs">meta.json</code> naming the series and commits in case order:</p>
+          <Command>{meta}</Command>
+          <Command>benchboard ingest q1.json --meta meta.json</Command>
+          <p className="text-muted-foreground text-xs">Repeat with the commands in reverse order for results that decide a change, and add intermediate commits to find which one caused it.</p>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 export function PullRequestPage() {
   const { id = "" } = useParams();
   const [params, setParams] = useSearchParams();
@@ -145,22 +225,20 @@ export function PullRequestPage() {
   const visible = useMemo(() => {
     if (!report) return [];
     const needle = search.trim().toLowerCase();
+    const focus = commitFilter !== null ? Number(commitFilter) : null;
     return report.series.filter((series) => {
-      const verdict = series.verdict;
+      // With a commit selected, verdict filters apply to that commit's step.
+      const verdict = focus !== null ? rowComparison(series, focus)?.verdict ?? null : series.verdict;
       if (filter === "regressions" && verdict !== "REGRESSION") return false;
       if (filter === "improvements" && verdict !== "IMPROVEMENT") return false;
       if (filter === "changed" && verdict !== "REGRESSION" && verdict !== "IMPROVEMENT") return false;
       if (filter === "profiled" && !series.points.some((point) => point.measurement?.profiles.length)) return false;
-      if (commitFilter !== null) {
-        const point = series.points.find((entry) => String(entry.position) === commitFilter);
-        const step = point?.vsPrevious?.verdict;
-        if (step !== "REGRESSION" && step !== "IMPROVEMENT") return false;
-      }
       return !needle || `${series.benchmark.key} ${series.caseKey} ${series.label}`.toLowerCase().includes(needle);
     }).sort((a, b) => {
       // Regressions first, then by magnitude of change.
       const rank = (v: Verdict | null) => v === "REGRESSION" ? 0 : v === "FAILED" ? 1 : v === "INCONCLUSIVE" ? 2 : v === "IMPROVEMENT" ? 3 : 4;
-      return rank(a.verdict) - rank(b.verdict) || Math.abs((b.headComparison?.ratio ?? 1) - 1) - Math.abs((a.headComparison?.ratio ?? 1) - 1);
+      const ca = rowComparison(a, focus), cb = rowComparison(b, focus);
+      return rank(ca?.verdict ?? null) - rank(cb?.verdict ?? null) || Math.abs((cb?.ratio ?? 1) - 1) - Math.abs((ca?.ratio ?? 1) - 1);
     });
   }, [report, filter, search, commitFilter]);
 
@@ -259,23 +337,24 @@ export function PullRequestPage() {
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2">
+      {report.series.length > 0 && <TopBarActions>
+      <div className="flex items-center gap-3">
         <Segmented value={statistic} onChange={(entry) => update({ statistic: entry === "MEAN" ? "MEAN" : null })}
           options={[{ value: "MEDIAN", label: "Median" }, { value: "MEAN", label: "Mean" }]} />
         <div className="flex items-center gap-2">
-          <MicroLabel>Threshold</MicroLabel>
+          <span className="sr-only">Threshold</span>
           <Select value={String(threshold * 100)} onValueChange={(entry) => update({ threshold: entry === "2" ? null : entry })}>
-            <SelectTrigger size="sm" className="w-20"><SelectValue /></SelectTrigger>
+            <SelectTrigger size="sm" className="w-20" aria-label="Threshold"><SelectValue /></SelectTrigger>
             <SelectContent>{["0.5", "1", "2", "3", "5", "10"].map((entry) => <SelectItem key={entry} value={entry}>±{entry}%</SelectItem>)}</SelectContent>
           </Select>
         </div>
         <div className="flex items-center gap-2">
-          <MicroLabel>Machine</MicroLabel>
+          <span className="sr-only">Machine</span>
           <Select value={report.machine?.id ?? ""} onValueChange={(entry) => update({ machine: entry })} disabled={report.machines.length < 2}>
-            <SelectTrigger size="sm" className="min-w-44"><SelectValue placeholder="No measurements" /></SelectTrigger>
+            <SelectTrigger size="sm" className="max-w-56" aria-label="Machine"><SelectValue placeholder="No measurements" /></SelectTrigger>
             <SelectContent>
               {report.machines.map((entry) => (
-                <SelectItem key={entry.machine.id} value={entry.machine.id}>{entry.machine.hostname} · {entry.machine.cpu} ({entry.count})</SelectItem>
+                <SelectItem key={entry.machine.id} value={entry.machine.id}>{entry.machine.hostname} <span className="text-muted-foreground">· {entry.machine.cpu} · {entry.count}</span></SelectItem>
               ))}
             </SelectContent>
           </Select>
@@ -286,9 +365,10 @@ export function PullRequestPage() {
         </div>
         {query.isFetching && <RefreshCw className="text-muted-foreground size-3.5 animate-spin" />}
       </div>
+      </TopBarActions>}
 
-      <Panel>
-        <StatStrip className="sm:grid-cols-2 xl:grid-cols-[1.4fr_1fr_1fr_1fr]">
+      {report.series.length > 0 && <Panel>
+        <StatStrip className="sm:grid-cols-3 xl:grid-cols-[1.6fr_1fr_1fr]">
           <div>
             <div className="mb-3 flex items-center justify-between">
               <MicroLabel>Head vs {s.missingReference === s.series ? "first measurement" : "base"} · {s.series} series</MicroLabel>
@@ -313,7 +393,7 @@ export function PullRequestPage() {
             </div>
           </div>
           <Stat label="Geometric mean change" value={geomean === null ? "—" : percentFromRatio(geomean, 1)}
-            tone={geomean === null ? undefined : geomean > 1 + threshold ? "bad" : geomean < 1 - threshold ? "good" : undefined}
+            badge={geomean !== null && Math.abs(geomean - 1) > threshold ? <Pill color={geomean > 1 ? "var(--bad)" : "var(--good)"} className="h-5 text-[11px]">{geomean > 1 ? "slower" : "faster"}</Pill> : undefined}
             detail={`${compared.length} of ${s.series} with head intervals${s.crossRun ? ` · ${s.crossRun} cross-invocation` : ""}`} />
           <div>
             <Stat label="Commits measured" value={measuredCommits.length} unit={`/ ${report.commits.length}`}
@@ -324,44 +404,37 @@ export function PullRequestPage() {
               label: <span className="font-mono">{commit.isBase ? "base" : `#${commit.position}`} {commit.commit.shortSha.slice(0, 7)}</span>,
             }))} />
           </div>
-          <Stat label="CPU profiles" value={profiles} detail={profiles ? "flame graphs per series" : "attach samply profiles to explain changes"} />
         </StatStrip>
-      </Panel>
+      </Panel>}
 
       {report.series.length === 0 ? (
-        <EmptyState title="No measurements on this pull request yet">
-          Ingest Hyperfine exports with <code>--commit</code> set to the base or PR commits, e.g.{" "}
-          <code>benchboard ingest bench.json --benchmark tpch/sf1 --commit HEAD</code>.
-        </EmptyState>
+        <MeasurePullRequest columns={columns} />
       ) : <>
         <Panel>
-          <PanelHeader icon={GitCommitHorizontal} title="Commits" subtitle="Step changes vs the previous measured commit · click to filter series" />
+          <PanelHeader icon={GitCommitHorizontal} title="Commits" subtitle={commitFilter !== null ? "Showing each series' step at the selected commit · click it again to return to head vs base" : "Step changes vs the previous measured commit · select a commit to see what it changed"} />
+          <Narrative report={report} columns={columns} onSelect={(position) => update({ commit: String(position), filter: null, scope: null })} />
           <div className="flex gap-1.5 overflow-x-auto px-4 pb-4">
             {columns.map((column, index) => {
               const active = commitFilter === String(column.position);
               const step = steps[index];
+              const measured = measuredCommits.some((commit) => commit.position === column.position);
               return (
-                <Tooltip key={column.position}>
-                  <TooltipTrigger asChild>
-                    <button type="button" onClick={() => update({ commit: active ? null : String(column.position), filter: null })}
-                      disabled={!step.up && !step.down && !step.gap}
-                      className={cn("bg-well grid min-w-28 flex-1 gap-1 rounded-xl border px-3 py-2 text-left transition-colors enabled:hover:border-foreground/25 disabled:opacity-70",
-                        active && "border-foreground/40 bg-accent")}>
-                      <span className="text-muted-foreground font-mono text-[10px] tracking-wide uppercase">{column.isBase ? "base" : `#${column.position}`}</span>
-                      <span className="font-mono text-xs">{column.label === "base" ? column.sha.slice(0, 7) : column.label}</span>
-                      <span className="flex h-4 items-center gap-2 font-mono text-[11px]">
-                        {step.up > 0 && <span className="text-bad">▲ {step.up}</span>}
-                        {step.down > 0 && <span className="text-good">▼ {step.down}</span>}
-                        {step.gap > 0 && <span className="text-muted-foreground" title="changes across unmeasured commits">≈ {step.gap}</span>}
-                        {!step.up && !step.down && !step.gap && <span className="text-muted-foreground/50">·</span>}
-                      </span>
-                    </button>
-                  </TooltipTrigger>
-                  <TooltipContent className="max-w-xs">
-                    <div className="font-medium">{column.subject || "(no subject)"}</div>
-                    {column.author && <div className="opacity-70">{column.author}</div>}
-                  </TooltipContent>
-                </Tooltip>
+                <button key={column.position} type="button" onClick={() => update({ commit: active ? null : String(column.position), filter: null, scope: null })}
+                  disabled={!measured || column.isBase} title={column.author ? `${column.subject}\n${column.author}` : column.subject}
+                  className={cn("bg-well grid h-[76px] min-w-40 flex-1 content-start gap-1 rounded-xl border px-3 py-2 text-left transition-colors",
+                    "enabled:hover:border-foreground/25 disabled:cursor-default outline-none focus-visible:ring-2 focus-visible:ring-ring/70",
+                    !measured && "opacity-55", active && "border-foreground/40 bg-accent")}>
+                  <span className="flex items-center gap-2">
+                    <span className="text-muted-foreground font-mono text-[10.5px]">{column.isBase ? "base" : `#${column.position}`}</span>
+                    <span className="font-mono text-xs">{column.sha.slice(0, 7)}</span>
+                    <span className="ml-auto flex items-center gap-1.5 font-mono text-[11px]">
+                      {step.up > 0 && <span className="text-bad">▲{step.up}</span>}
+                      {step.down > 0 && <span className="text-good">▼{step.down}</span>}
+                      {step.gap > 0 && <span className="text-muted-foreground" title="changes across unmeasured commits">≈{step.gap}</span>}
+                    </span>
+                  </span>
+                  <span className="text-muted-foreground line-clamp-2 text-xs leading-4">{column.subject || "(no subject)"}</span>
+                </button>
               );
             })}
           </div>
@@ -380,7 +453,7 @@ export function PullRequestPage() {
             <div className="flex flex-wrap items-center gap-2 px-4 pb-3">
               <Segmented value={filter} onChange={(entry) => update({ filter: entry === "all" ? null : entry })} options={[
                 { value: "all", label: "All" }, { value: "changed", label: "Changed" }, { value: "regressions", label: "Regressions" },
-                { value: "improvements", label: "Improvements" }, { value: "profiled", label: "Profiled" },
+                { value: "improvements", label: "Improvements" }, { value: "profiled", label: profiles ? `Profiled · ${profiles}` : "Profiled" },
               ]} />
               <div className="relative ml-auto">
                 <Search className="text-muted-foreground absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
@@ -389,7 +462,7 @@ export function PullRequestPage() {
             </div>
             {view === "list" && (
               <div className="@container px-2 pb-2" data-series-list role="group" aria-label="Series">
-                <div className={cn("text-muted-foreground grid gap-3 px-3 pb-1.5 font-mono text-[10px] tracking-wide whitespace-nowrap uppercase", ROW_GRID)}>
+                <div className={cn("text-muted-foreground grid gap-3 px-3 pb-1.5 text-xs whitespace-nowrap", ROW_GRID)}>
                   <span>Series</span><span style={{ width: columns.length * 9 - 3 }}>Commits</span><span className="hidden @xl:block">Trend</span>
                   <span className="hidden @md:block">{focusPosition !== null ? "Step · 95% CI" : "Head · 95% CI"}</span>
                   <span className="text-right">{focusPosition !== null ? `Δ at #${focusPosition}` : "Δ head"}</span><span />
@@ -432,7 +505,7 @@ export function PullRequestPage() {
             )}
           </Panel>
 
-          <div className={cn("space-y-3", view === "list" && "xl:sticky xl:top-16 xl:max-h-[calc(100svh-5rem)] xl:overflow-y-auto xl:rounded-2xl")}>
+          <div className={cn("space-y-3", view === "list" && "xl:sticky xl:top-16 xl:max-h-[calc(100svh-5rem)] xl:overflow-y-auto xl:rounded-2xl xl:[mask-image:linear-gradient(to_bottom,black_calc(100%-2rem),transparent)] xl:pb-6")}>
             {selected ? (
               <SeriesInspector
                 series={selected} report={report} statistic={statistic} threshold={threshold}
@@ -441,7 +514,7 @@ export function PullRequestPage() {
                 onNext={selectedIndex >= 0 && selectedIndex < visible.length - 1 ? () => update({ series: visible[selectedIndex + 1].id }) : undefined}
                 scope={scope}
                 onScopeChange={(next) => update({ scope: next.kind === "head" ? (commitFilter !== null ? "head" : null) : String(next.position) })}
-                profilesAnchor={profilePair ? "#profile-diff" : undefined}
+                profilePair={profilePair}
               />
             ) : <EmptyState title="Select a series" />}
           </div>
@@ -449,7 +522,6 @@ export function PullRequestPage() {
 
         {selected && profilePair && (
           <div id="profile-diff" className="scroll-mt-16 space-y-2">
-            {profilePair.fallback && <p className="text-muted-foreground text-xs">The compared baseline has no profile; using another profiled measurement at the same commit.</p>}
             <ProfileDiffView key={`${profilePair.base}:${profilePair.head}`} baseId={profilePair.base} headId={profilePair.head} inline />
           </div>
         )}

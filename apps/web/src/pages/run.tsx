@@ -180,7 +180,7 @@ export function RunPage() {
           subtitle={`Repeated cases compare with their first occurrence · click a change to use one baseline · ${statistic.toLowerCase()} ratio, bootstrap 95% CI`}
           actions={baselineChoice && <button type="button" className="text-muted-foreground text-xs underline" onClick={() => setBaseline(null)}>reset baseline</button>} />
         <div className="px-2 pb-2">
-          <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase", GRID)}>
+          <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 text-xs", GRID)}>
             <span>Case</span><span>Commit</span><span className="text-right">{statistic === "MEAN" ? "Mean" : "Median"}</span><span className="text-right">± SD</span><span className="text-right">n</span><span className="text-right">Change</span>
           </div>
           {run.measurements.map((m) => {

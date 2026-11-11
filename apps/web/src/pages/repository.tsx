@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router";
-import { Flame, GitBranch, GitCompare, GitPullRequest, Layers, ListChecks, Plus, Search } from "lucide-react";
+import { ChevronRight, Flame, GitBranch, GitCompare, GitPullRequest, Layers, ListChecks, Plus, Search } from "lucide-react";
 import { toast } from "sonner";
 import { graphql } from "@/gql";
 import { Button } from "@/components/ui/button";
@@ -10,7 +10,7 @@ import { RunsTable } from "@/components/bench/runs-table";
 import { EmptyState, ErrorState, LoadingState, NotFound } from "@/components/bench/states";
 import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
-import { DeltaPill, SegmentedBar, Sparkline, verdictVar } from "@/components/kit/encodings";
+import { DeltaPill, Segmented, SegmentedBar, Sparkline, verdictVar } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
 import { dateTime, duration, primaryMachine, relativeTime, seriesName, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -143,7 +143,7 @@ function PullRequestRows({ pullRequests }: { pullRequests: PullRequest[] }) {
   }
   return (
     <div className="@container px-2 pb-2">
-      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase", PR_GRID)}>
+      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 text-xs", PR_GRID)}>
         <span>Pull request</span><span className="hidden @lg:block">Head verdicts</span><span className="text-right">Geomean</span><span className="hidden text-right @md:block">Updated</span>
       </div>
       {pullRequests.map((pr) => {
@@ -185,43 +185,128 @@ function PullRequestRows({ pullRequests }: { pullRequests: PullRequest[] }) {
   );
 }
 
+type BenchmarkRow = ReturnType<typeof benchmarkRows>[number];
+
+/** Series rows with a comparable cohort (one machine, clean and passing) and the latest step within it. */
+function benchmarkRows(repository: Repository) {
+  return (repository.benchmarks ?? []).flatMap((benchmark) => benchmark.cases.map((entry) => {
+    // Other machines and dirty or failed builds are not comparable, so they are left out rather than joined into one line.
+    const eligible = entry.measurements.filter((m) => !m.dirty && m.status !== "FAILED");
+    const machine = primaryMachine(entry.measurements);
+    const cohort = eligible.filter((m) => m.run.machine.id === machine).slice(-30);
+    const last = cohort.at(-1) ?? entry.measurements.at(-1);
+    const previous = cohort.at(-2);
+    const change = last && previous && previous.median > 0 ? last.median / previous.median : null;
+    return { benchmark, entry, cohort, last, change, machines: new Set(entry.measurements.map((m) => m.run.machine.id)).size };
+  }));
+}
+
+const BENCH_GRID = "grid-cols-[minmax(0,1fr)_5rem_4.5rem] @md:grid-cols-[minmax(0,1fr)_8rem_5.5rem_4.5rem] @xl:grid-cols-[minmax(0,1fr)_8rem_5.5rem_4.5rem_3.5rem_6rem]";
+
+function BenchmarkRow({ row, grouped = false }: { row: BenchmarkRow; grouped?: boolean }) {
+  const { benchmark, entry, cohort, last, change, machines } = row;
+  return (
+    <Link to={`/benchmarks/${benchmark.id}?case=${encodeURIComponent(entry.caseKey)}`}
+      className={cn("hover:bg-accent/50 grid items-center gap-4 rounded-lg px-3 py-2", BENCH_GRID, grouped && "pl-8")}>
+      <span className="min-w-0">
+        {!grouped && <span className="text-muted-foreground block truncate font-mono text-[11px]">{benchmark.key}</span>}
+        <span className="block truncate text-sm">{entry.caseKey === "default" ? benchmark.title ?? benchmark.key : entry.caseKey}</span>
+      </span>
+      <span className="hidden gap-0.5 @md:grid" title={`${cohort.length} clean measurements on ${last?.run.machine.hostname ?? "?"}`}>
+        {cohort.length > 1 ? <Sparkline values={cohort.map((m) => m.median)} width={128} height={20} color="var(--info)" />
+          : <span className="text-muted-foreground font-mono text-[11px]">single run</span>}
+        <span className="text-muted-foreground truncate font-mono text-[10px]">
+          {last?.run.machine.hostname}{machines > 1 ? ` · +${machines - 1}` : ""}
+        </span>
+      </span>
+      <span className="text-right font-mono text-sm tabular-nums">{last ? duration(last.median) : "—"}</span>
+      <span className="text-right">
+        {change !== null ? <DeltaPill ratio={change} digits={1} verdict={change > 1.02 ? "REGRESSION" : change < 0.98 ? "IMPROVEMENT" : "UNCHANGED"} />
+          : <span className="text-muted-foreground/60 text-xs">—</span>}
+      </span>
+      <span className="text-muted-foreground hidden text-right font-mono text-xs @xl:block">{entry.count}</span>
+      <span className="text-muted-foreground hidden text-right text-xs @xl:block">{relativeTime(entry.lastRecordedAt)}</span>
+    </Link>
+  );
+}
+
+function BenchmarkHeader() {
+  return (
+    <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 text-xs", BENCH_GRID)}>
+      <span>Series</span><span className="hidden @md:block">Recent medians</span><span className="text-right">Latest</span>
+      <span className="text-right">Δ last</span><span className="hidden text-right @xl:block">Runs</span><span className="hidden text-right @xl:block">Recorded</span>
+    </div>
+  );
+}
+
 function BenchmarkRows({ repository, limit }: { repository: Repository; limit?: number }) {
-  const rows = (repository.benchmarks ?? []).flatMap((benchmark) => benchmark.cases.map((entry) => ({ benchmark, entry })))
-    .sort((a, b) => b.entry.lastRecordedAt.localeCompare(a.entry.lastRecordedAt)).slice(0, limit);
+  const rows = benchmarkRows(repository).sort((a, b) => b.entry.lastRecordedAt.localeCompare(a.entry.lastRecordedAt)).slice(0, limit);
   if (!rows.length) return <EmptyState title="No benchmarks yet" />;
   return (
-    <div className="px-2 pb-2">
-      <div className="text-muted-foreground grid grid-cols-[minmax(0,1fr)_8rem_6rem_4rem_6rem] gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase">
-        <span>Series</span><span>Recent medians</span><span className="text-right">Latest</span><span className="text-right">Runs</span><span className="text-right">Recorded</span>
-      </div>
-      {rows.map(({ benchmark, entry }) => {
-        // One cohort per sparkline: the latest clean, passing measurement's machine. Other machines and
-        // dirty or failed builds are not comparable, so they are left out rather than joined into one line.
-        const eligible = entry.measurements.filter((m) => !m.dirty && m.status !== "FAILED");
-        const machine = primaryMachine(entry.measurements);
-        const cohort = eligible.filter((m) => m.run.machine.id === machine).slice(-30);
-        const last = cohort.at(-1) ?? entry.measurements.at(-1);
-        const machines = new Set(entry.measurements.map((m) => m.run.machine.id)).size;
-        return (
-          <Link key={`${benchmark.id}:${entry.caseKey}`} to={`/benchmarks/${benchmark.id}?case=${encodeURIComponent(entry.caseKey)}`}
-            className="hover:bg-accent/50 grid grid-cols-[minmax(0,1fr)_8rem_6rem_4rem_6rem] items-center gap-4 rounded-lg px-3 py-2">
-            <span className="min-w-0">
-              <span className="text-muted-foreground block truncate font-mono text-[11px]">{benchmark.key}</span>
-              <span className="block truncate text-sm">{entry.caseKey === "default" ? benchmark.title ?? benchmark.key : entry.caseKey}</span>
-            </span>
-            <span className="grid gap-0.5" title={`${cohort.length} clean measurements on ${last?.run.machine.hostname ?? "?"}`}>
-              <Sparkline values={cohort.map((m) => m.median)} width={128} height={22} color="var(--info)" />
-              <span className="text-muted-foreground truncate font-mono text-[10px]">
-                {last?.run.machine.hostname}{machines > 1 ? ` · +${machines - 1} other machine${machines > 2 ? "s" : ""}` : ""}
-              </span>
-            </span>
-            <span className="text-right font-mono text-sm tabular-nums">{last ? duration(last.median) : "—"}</span>
-            <span className="text-muted-foreground text-right font-mono text-xs">{entry.count}</span>
-            <span className="text-muted-foreground text-right text-xs">{relativeTime(entry.lastRecordedAt)}</span>
-          </Link>
-        );
-      })}
+    <div className="@container px-2 pb-2">
+      <BenchmarkHeader />
+      {rows.map((row) => <BenchmarkRow key={`${row.benchmark.id}:${row.entry.caseKey}`} row={row} />)}
     </div>
+  );
+}
+
+type BenchmarkSort = "recent" | "change" | "name";
+
+/** Full benchmark browser: search, sort, grouping by benchmark and single-run series hidden by default. */
+function BenchmarkBrowser({ repository }: { repository: Repository }) {
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<BenchmarkSort>("recent");
+  const [singles, setSingles] = useState(false);
+  const [open, setOpen] = useState<Set<string>>(new Set());
+  const needle = search.trim().toLowerCase();
+  const all = benchmarkRows(repository);
+  const rows = all.filter((row) => (singles || row.entry.count > 1) &&
+    (!needle || `${row.benchmark.key} ${row.benchmark.title ?? ""} ${row.entry.caseKey}`.toLowerCase().includes(needle)));
+  const order = (a: BenchmarkRow, b: BenchmarkRow) => sort === "name" ? a.entry.caseKey.localeCompare(b.entry.caseKey)
+    : sort === "change" ? Math.abs((b.change ?? 1) - 1) - Math.abs((a.change ?? 1) - 1)
+      : b.entry.lastRecordedAt.localeCompare(a.entry.lastRecordedAt);
+  const groups = [...Map.groupBy(rows, (row) => row.benchmark.id).values()].map((list) => list.sort(order));
+  groups.sort((a, b) => sort === "name" ? a[0].benchmark.key.localeCompare(b[0].benchmark.key) : order(a[0], b[0]));
+  const hidden = all.length - all.filter((row) => singles || row.entry.count > 1).length;
+  const toggle = (key: string) => setOpen((current) => {
+    const next = new Set(current);
+    next.has(key) ? next.delete(key) : next.add(key);
+    return next;
+  });
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-3 px-4 pb-3">
+        <SearchBox value={search} onChange={setSearch} placeholder="Benchmark, title or case…" />
+        <Segmented value={sort} onChange={setSort} options={[{ value: "recent", label: "Recent" }, { value: "change", label: "Largest change" }, { value: "name", label: "Name" }]} />
+        <label className="text-muted-foreground ml-auto flex items-center gap-2 text-xs">
+          <Checkbox checked={singles} onCheckedChange={(checked) => setSingles(checked === true)} />
+          Single-run series{hidden ? ` (${hidden} hidden)` : ""}
+        </label>
+      </div>
+      <div className="@container px-2 pb-2">
+        <BenchmarkHeader />
+        {groups.map((group) => {
+          const benchmark = group[0].benchmark;
+          // Single-series benchmarks render flat; larger ones collapse under a header (expanded while searching).
+          if (group.length === 1) return <BenchmarkRow key={benchmark.id} row={group[0]} />;
+          const expanded = Boolean(needle) || open.has(benchmark.id);
+          const changed = group.filter((row) => row.change !== null && Math.abs(row.change - 1) > 0.02).length;
+          return (
+            <div key={benchmark.id}>
+              <button type="button" onClick={() => toggle(benchmark.id)} aria-expanded={expanded}
+                className="hover:bg-accent/50 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left">
+                <ChevronRight className={cn("text-muted-foreground size-3.5 transition-transform", expanded && "rotate-90")} />
+                <span className="font-mono text-xs font-medium">{benchmark.key}</span>
+                <span className="text-muted-foreground truncate text-xs">{benchmark.title}</span>
+                <span className="text-muted-foreground ml-auto font-mono text-[11px]">{group.length} series{changed ? ` · ${changed} changed` : ""}</span>
+              </button>
+              {expanded && group.map((row) => <BenchmarkRow key={`${benchmark.id}:${row.entry.caseKey}`} row={row} grouped />)}
+            </div>
+          );
+        })}
+        {!groups.length && <EmptyState title={needle ? "No series match" : "No benchmarks yet"} />}
+      </div>
+    </>
   );
 }
 
@@ -247,7 +332,7 @@ function ProfileRows({ repository, selectable = false }: { repository: Repositor
           }}><GitCompare /> Compare</Button>
         </div>
       )}
-      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 font-mono text-[10px] tracking-wide uppercase", selectable ? SELECTABLE_GRID : COMPACT_GRID)}>
+      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 text-xs", selectable ? SELECTABLE_GRID : COMPACT_GRID)}>
         {selectable && <span />}<span>Series</span><span className="hidden @md:block">Commit</span><span className="text-right">CPU / iter</span>
         {selectable && <span className="hidden text-right @lg:block">Symbols</span>}<span className="hidden text-right @sm:block">Recorded</span>
       </div>
@@ -283,7 +368,7 @@ function Loaded({ query, children }: { query: ReturnType<typeof useRepository>; 
 }
 
 export function RepositoryOverviewPage() {
-  const query = useRepository({ pulls: true, benchmarks: true, runs: 8, profiles: 6 });
+  const query = useRepository({ pulls: true, benchmarks: true, runs: 8, profiles: 1 });
   return <Loaded query={query}>{(repository) => {
     const pullRequests = repository.pullRequests ?? [];
     const benchmarks = repository.benchmarks ?? [];
@@ -301,13 +386,12 @@ export function RepositoryOverviewPage() {
           <StatStrip className="sm:grid-cols-2 xl:grid-cols-4">
             <Stat label="Runs" value={repository.runCount} detail={lastRun ? `last ${relativeTime(lastRun.recordedAt)}` : "none yet"} />
             <Stat label="Series" value={seriesCount} detail={`${benchmarks.length} benchmarks`} />
-            <Stat label="Tracked pull requests" value={pullRequests.length} tone={attention ? "bad" : undefined}
-              detail={attention ? `${attention} with regressions` : "no regressions"} />
+            <Stat label="PRs with regressions" value={attention} unit={`/ ${pullRequests.length}`} tone={attention ? "bad" : undefined}
+              detail={pullRequests.length ? attention ? "open them from the list below" : "nothing regressed at head" : "no tracked pull requests"} />
             <Stat label="CPU profiles" value={repository.profileCount} detail={repository.profiles[0] ? `latest ${relativeTime(repository.profiles[0].recordedAt)}` : "none yet"} />
           </StatStrip>
         </Panel>
-        {/* Side by side only when both cards have room for their columns; otherwise they stack. */}
-        <div className="grid items-start gap-5 2xl:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+        {pullRequests.length ? (
           <Panel>
             <PanelHeader icon={GitPullRequest} title="Pull requests" subtitle="Head vs base across all measured series"
               actions={<>
@@ -316,14 +400,17 @@ export function RepositoryOverviewPage() {
               </>} />
             <PullRequestRows pullRequests={pullRequests.slice(0, 8)} />
           </Panel>
-          <Panel>
-            <PanelHeader icon={Flame} title="Recent profiles" subtitle="samply flame graphs attached to measurements"
-              actions={<Button variant="ghost" size="sm" asChild><Link to={`/repositories/${repository.id}/profiles`}>All</Link></Button>} />
-            <ProfileRows repository={repository} />
-          </Panel>
-        </div>
+        ) : (
+          // An empty card would push the data down; a single line says what to do instead.
+          <div className="bg-card flex flex-wrap items-center gap-3 rounded-2xl border px-4 py-3 text-sm">
+            <GitPullRequest className="text-muted-foreground size-4" />
+            <span className="text-muted-foreground">No tracked pull requests. Track one to see per-commit verdicts:</span>
+            <code className="bg-well rounded-md border px-2 py-0.5 font-mono text-xs">benchboard pr track --branch</code>
+            {repository.githubRepo && <span className="ml-auto"><TrackPullRequest repository={repository.id} /></span>}
+          </div>
+        )}
         <Panel>
-          <PanelHeader icon={Layers} title="Benchmarks" subtitle="Most recently measured series"
+          <PanelHeader icon={Layers} title="Benchmarks" subtitle="Most recently measured series · Δ is the latest clean measurement vs the one before on the same machine"
             actions={<Button variant="ghost" size="sm" asChild><Link to={`/repositories/${repository.id}/benchmarks`}>All</Link></Button>} />
           <BenchmarkRows repository={repository} limit={10} />
         </Panel>
@@ -357,8 +444,8 @@ export function BenchmarksPage() {
     <div className="space-y-5">
       <Crumbs items={[{ label: repository.name, to: `/repositories/${repository.id}` }, { label: "Benchmarks" }]} />
       <Panel>
-        <PanelHeader icon={Layers} title="Benchmarks" subtitle={`${repository.benchmarks?.length ?? 0} benchmarks · one row per series (benchmark · case)`} />
-        <BenchmarkRows repository={repository} />
+        <PanelHeader icon={Layers} title="Benchmarks" subtitle={`${repository.benchmarks?.length ?? 0} benchmarks · one row per series (benchmark · case) · Δ is the latest step on the primary machine`} />
+        <BenchmarkBrowser repository={repository} />
       </Panel>
     </div>
   )}</Loaded>;

@@ -2,7 +2,7 @@ import { createContext, useContext, useEffect, useMemo, useState, type ReactNode
 import { createPortal } from "react-dom";
 import { Link, useLocation, useNavigate } from "react-router";
 import {
-  Activity, ChevronsUpDown, Flame, FolderGit2, GitBranch, GitPullRequest, Layers, LayoutDashboard, ListChecks, Moon, Search, Sun, Workflow,
+  Activity, ChevronsUpDown, Home, Flame, FolderGit2, GitBranch, GitPullRequest, Layers, LayoutDashboard, ListChecks, Moon, Search, Sun, Workflow,
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import { graphql } from "@/gql";
@@ -58,9 +58,10 @@ interface ShellContextValue {
   repositoryId: string | null;
   setRepositoryId: (id: string) => void;
   slot: HTMLElement | null;
+  actions: HTMLElement | null;
 }
 
-const ShellContext = createContext<ShellContextValue>({ repositoryId: null, setRepositoryId: () => {}, slot: null });
+const ShellContext = createContext<ShellContextValue>({ repositoryId: null, setRepositoryId: () => {}, slot: null, actions: null });
 
 /** Pages announce which repository they belong to so the sidebar follows them. */
 export function useRepositoryScope(id: string | null | undefined) {
@@ -79,6 +80,12 @@ export function useCurrentRepository() {
 export function TopBar({ children }: { children: ReactNode }) {
   const { slot } = useContext(ShellContext);
   return slot ? createPortal(children, slot) : null;
+}
+
+/** Page actions and controls rendered on the right of the top bar. */
+export function TopBarActions({ children }: { children: ReactNode }) {
+  const { actions } = useContext(ShellContext);
+  return actions ? createPortal(children, actions) : null;
 }
 
 export function Crumbs({ items }: { items: { label: ReactNode; to?: string }[] }) {
@@ -192,17 +199,23 @@ function Palette({ open, onOpenChange, repositoryId }: { open: boolean; onOpenCh
 export function AppShell({ children }: { children: ReactNode }) {
   const [repositoryId, setRepositoryIdState] = useState<string | null>(() => localStorage.getItem("benchboard.repository"));
   const [slot, setSlot] = useState<HTMLElement | null>(null);
+  const [actions, setActions] = useState<HTMLElement | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const location = useLocation();
   const navigate = useNavigate();
   const shell = useGraphQL(ShellQuery, {}, { staleTime: 30_000 });
   const repositories = shell.data?.repositories ?? [];
-  const repository = repositories.find((entry) => entry.id === repositoryId) ?? repositories[0];
+  // Default to the repository with the most recent pull request activity, then the most runs.
+  const preferred = [...repositories].sort((a, b) => {
+    const activity = (entry: typeof a) => entry.pullRequests.map((pr) => pr.updatedAt ?? pr.syncedAt).sort().at(-1) ?? "";
+    return activity(b).localeCompare(activity(a)) || b.runCount - a.runCount;
+  })[0];
+  const repository = repositories.find((entry) => entry.id === repositoryId) ?? preferred;
   const setRepositoryId = (id: string) => {
     localStorage.setItem("benchboard.repository", id);
     setRepositoryIdState(id);
   };
-  const context = useMemo(() => ({ repositoryId: repository?.id ?? null, setRepositoryId, slot }), [repository?.id, slot]);
+  const context = useMemo(() => ({ repositoryId: repository?.id ?? null, setRepositoryId, slot, actions }), [repository?.id, slot, actions]);
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
@@ -216,7 +229,8 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   // Without a repository the sections have nothing to show; they are listed but disabled.
   const base = repository ? `/repositories/${repository.id}` : null;
-  const nav: { label: string; icon: typeof Flame; to: string; exact?: boolean; count?: number }[] = !base ? [{ label: "Overview", icon: LayoutDashboard, to: "/", exact: true }] : [
+  const nav: { label: string; icon: typeof Flame; to: string; exact?: boolean; count?: number }[] = !base ? [{ label: "Home", icon: Home, to: "/", exact: true }] : [
+    { label: "Home", icon: Home, to: "/", exact: true },
     { label: "Overview", icon: LayoutDashboard, to: base, exact: true },
     { label: "Pull requests", icon: GitPullRequest, to: `${base}/pulls`, count: repository?.pullRequests.length },
     { label: "Benchmarks", icon: Layers, to: `${base}/benchmarks`, count: repository?.benchmarks.length },
@@ -295,12 +309,16 @@ export function AppShell({ children }: { children: ReactNode }) {
                             <span className="grid min-w-0 flex-1">
                               <span className="truncate text-[13px]">{pr.title}</span>
                               <span className="text-muted-foreground flex items-center gap-1.5 font-mono text-[10.5px]">
-                                <StatusDot color={color} className="size-1.5" />
                                 {s.series ? <>
-                                  {s.regressions > 0 && <span className="text-bad">▲{s.regressions}</span>}
-                                  {s.improvements > 0 && <span className="text-good">▼{s.improvements}</span>}
-                                  <span>{s.series} series</span>
-                                </> : <span>not measured</span>}
+                                  {/* Head verdict mix: slower · inconclusive · unchanged · faster. */}
+                                  <span className="flex h-1 w-10 gap-px overflow-hidden rounded-full">
+                                    {([[s.regressions, verdictVar.REGRESSION], [s.inconclusive, verdictVar.INCONCLUSIVE],
+                                      [s.series - s.regressions - s.improvements - s.inconclusive, verdictVar.UNCHANGED], [s.improvements, verdictVar.IMPROVEMENT]] as const)
+                                      .filter(([count]) => count > 0).map(([count, fill], index) => <span key={index} style={{ flexGrow: count, background: fill }} />)}
+                                  </span>
+                                  <span className={s.regressions ? "text-bad" : undefined}>{s.regressions} slower</span>
+                                  <span className={s.improvements ? "text-good" : undefined}>{s.improvements} faster</span>
+                                </> : <><StatusDot color={color} className="size-1.5" /><span>not measured</span></>}
                               </span>
                             </span>
                           </Link>
@@ -328,6 +346,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
             <div ref={setSlot} className="flex min-w-0 flex-1 items-center gap-2" />
+            <div ref={setActions} className="flex shrink-0 items-center gap-2" />
           </header>
           <div key={location.pathname} className="mx-auto w-full max-w-[1600px] px-6 py-6">{children}</div>
         </SidebarInset>

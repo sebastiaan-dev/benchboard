@@ -137,7 +137,9 @@ const distributionConfig = {
 } satisfies ChartConfig;
 
 /** Overlaid histograms (share of samples per bin) for the reference and head, with median markers. */
-export function DistributionChart({ base, head, bins = 24 }: { base: number[]; head: number[]; bins?: number }) {
+export function DistributionChart({ base, head, bins = 24, labels = { base: "base", head: "head" } }: {
+  base: number[]; head: number[]; bins?: number; labels?: { base: string; head: string };
+}) {
   const all = [...base, ...head].sort((a, b) => a - b);
   if (!all.length) return null;
   // Trim the outer 1% so a single outlier does not flatten the histogram.
@@ -165,8 +167,8 @@ export function DistributionChart({ base, head, bins = 24 }: { base: number[]; h
       <EvilComposedChart.Grid />
       <EvilComposedChart.XAxis dataKey="bin" tick={{ fontSize: 10, fontFamily: "var(--font-mono)" }} interval="preserveStartEnd" unit={` ${unit}`} />
       <EvilComposedChart.YAxis tickFormatter={(value: number) => `${Math.round(value)}%`} width={44} />
-      {mb && <ReferenceLine x={mb} stroke="var(--muted-foreground)" strokeDasharray="3 3" label={{ value: "ref p50", position: "top", fill: "var(--muted-foreground)", fontSize: 10 }} />}
-      {mh && <ReferenceLine x={mh} stroke="var(--color-head-0)" strokeDasharray="3 3" label={{ value: "head p50", position: "top", fill: "var(--color-head-0)", fontSize: 10 }} />}
+      {mb && <ReferenceLine x={mb} stroke="var(--muted-foreground)" strokeDasharray="3 3" label={{ value: `${labels.base} p50`, position: "top", fill: "var(--muted-foreground)", fontSize: 10 }} />}
+      {mh && <ReferenceLine x={mh} stroke="var(--color-head-0)" strokeDasharray="3 3" label={{ value: `${labels.head} p50`, position: "top", fill: "var(--color-head-0)", fontSize: 10 }} />}
       <EvilComposedChart.Bar dataKey="base" />
       <EvilComposedChart.Bar dataKey="head" />
     </EvilComposedChart>

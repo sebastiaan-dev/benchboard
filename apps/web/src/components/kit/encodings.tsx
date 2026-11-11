@@ -43,7 +43,7 @@ export function Pill({ color, children, className }: { color?: string; children:
   );
 }
 
-/** Signed relative change pill: "↑ 12.4%" in the semantic color of its verdict. */
+/** Signed relative change pill ("−12.4%") in the semantic color of its verdict, matching the rest of the app's signs. */
 export function DeltaPill({ ratio, verdict, digits = 1, className }: { ratio: number; verdict?: Verdict | null; digits?: number; className?: string }) {
   const change = (ratio - 1) * 100;
   const fill = verdict ? verdictVar[verdict] : "var(--muted-foreground)";
@@ -51,7 +51,7 @@ export function DeltaPill({ ratio, verdict, digits = 1, className }: { ratio: nu
   return (
     <span className={cn("inline-flex items-center gap-0.5 rounded-md px-1.5 py-0.5 font-mono text-xs font-medium tabular-nums", className)}
       style={{ color, background: `color-mix(in oklch, ${fill} 14%, transparent)` }}>
-      {change >= 0 ? "↑" : "↓"} {Math.abs(change).toFixed(digits)}%
+      {change >= 0 ? "+" : "−"}{Math.abs(change).toFixed(digits)}%
     </span>
   );
 }

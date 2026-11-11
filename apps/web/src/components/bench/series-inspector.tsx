@@ -1,4 +1,6 @@
+import { useState } from "react";
 import { Link } from "react-router";
+import { graphql } from "@/gql";
 import { ChevronLeft, ChevronRight, Flame, GitCompare, LineChart } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -82,10 +84,56 @@ function Change({ comparison }: { comparison: Point["vsReference"] }) {
 }
 
 /** Persistent detail panel for one series and one comparison scope. */
-export function SeriesInspector({ series, report, statistic, threshold, scope, onScopeChange, position, onPrevious, onNext, profilesAnchor }: {
+type Tab = "summary" | "samples" | "measurements" | "provenance";
+
+/** Top function changes for the compared profiles, computed on the server. */
+const TopChangesQuery = graphql(`
+  query InspectorTopChanges($base: ID!, $head: ID!) {
+    profileDiff(base: $base, head: $head, limit: 3) { baseMs headMs functions { name deltaSelfMs baseSelfMs headSelfMs } }
+  }
+`);
+
+function TopChanges({ pair, anchor }: { pair: { base: string; head: string; fallback: boolean }; anchor: string }) {
+  const query = useGraphQL(TopChangesQuery, { base: pair.base, head: pair.head });
+  const diff = query.data?.profileDiff;
+  const max = Math.max(1e-9, ...(diff?.functions ?? []).map((entry) => Math.abs(entry.deltaSelfMs)));
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center gap-2 px-1">
+        <Flame className="size-3.5 text-orange-500" />
+        <SectionLabel>Where the time went · on-CPU per iteration</SectionLabel>
+        <Button size="sm" variant="ghost" className="ml-auto h-7" asChild><a href={anchor}><GitCompare /> Flame graph</a></Button>
+      </div>
+      <Well className="divide-y overflow-hidden">
+        {!diff ? <Skeleton className="h-24" /> : <>
+          <div className="text-muted-foreground flex justify-between px-3 py-1.5 font-mono text-[11px]">
+            <span>total {duration(diff.baseMs / 1000)} → {duration(diff.headMs / 1000)}</span>
+            <span>{percentFromRatio(diff.baseMs ? diff.headMs / diff.baseMs : 1, 1)}</span>
+          </div>
+          {diff.functions.map((entry) => (
+            <div key={entry.name} className="grid grid-cols-[4.5rem_4rem_minmax(0,1fr)] items-center gap-3 px-3 py-1.5 text-xs">
+              <span className={cn("text-right font-mono tabular-nums", entry.deltaSelfMs > 0 ? "text-bad" : "text-info")}>
+                {entry.deltaSelfMs >= 0 ? "+" : ""}{entry.deltaSelfMs.toFixed(Math.abs(entry.deltaSelfMs) >= 10 ? 1 : 2)} ms
+              </span>
+              <span className="bg-muted relative h-1.5 overflow-hidden rounded-full">
+                <span className="absolute inset-y-0 left-0 rounded-full" style={{ width: `${(Math.abs(entry.deltaSelfMs) / max) * 100}%`, background: entry.deltaSelfMs > 0 ? "var(--bad)" : "var(--info)" }} />
+              </span>
+              <span className="truncate font-mono" title={entry.name}>{entry.name}</span>
+            </div>
+          ))}
+        </>}
+      </Well>
+      {pair.fallback && <p className="text-muted-foreground px-1 text-[11px]">The compared baseline has no profile; using another profiled measurement at the same commit.</p>}
+    </section>
+  );
+}
+
+export function SeriesInspector({ series, report, statistic, threshold, scope, onScopeChange, position, onPrevious, onNext, profilePair }: {
   series: Series; report: Report; statistic: Statistic; threshold: number; scope: Scope; onScopeChange: (scope: Scope) => void;
-  position: { index: number; total: number } | null; onPrevious?: () => void; onNext?: () => void; profilesAnchor?: string;
+  position: { index: number; total: number } | null; onPrevious?: () => void; onNext?: () => void;
+  profilePair: { base: string; head: string; fallback: boolean } | null;
 }) {
+  const [tab, setTab] = useState<Tab>("summary");
   const scoped = scopedComparison(series, scope);
   const comparison = scoped.comparison;
   const ids = comparison ? [...new Set([comparison.baseline.id, comparison.candidate.id])] : [];
@@ -119,7 +167,6 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
         title={name}
         subtitle={series.benchmark.title ?? series.label}
         actions={<>
-          <VerdictBadge verdict={comparison?.verdict} />
           {position && (
             <span className="text-muted-foreground flex items-center font-mono text-[11px]">
               <Button variant="ghost" size="icon" className="size-7" disabled={!onPrevious} onClick={onPrevious} aria-label="Previous series"><ChevronLeft /></Button>
@@ -131,7 +178,6 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
       />
       <div className="space-y-4 px-4 pb-4">
         <div className="flex flex-wrap items-center gap-2">
-          <MicroLabel>Compare</MicroLabel>
           <Segmented
             value={scope.kind}
             onChange={(entry) => onScopeChange(entry === "head" ? { kind: "head" } : { kind: "step", position: steps.at(-1)?.position ?? 0 })}
@@ -156,8 +202,9 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
 
         <Well className="p-4">
           <MicroLabel>{statistic === "MEAN" ? "Mean" : "Median"} · {scoped.title}</MicroLabel>
-          <div className="mt-1 text-3xl font-semibold tracking-tight tabular-nums" style={{ color: comparison ? verdictText(comparison.verdict) : undefined }}>
-            {comparison ? percentFromRatio(comparison.ratio, 2) : "—"}
+          <div className="mt-1 flex items-center gap-3">
+            <span className="text-3xl font-medium tracking-tight tabular-nums">{comparison ? percentFromRatio(comparison.ratio, 2) : "—"}</span>
+            {comparison && <VerdictBadge verdict={comparison.verdict} />}
           </div>
           <div className="text-muted-foreground mt-1 font-mono text-[11px]">
             {!comparison ? scoped.note ?? "only one commit measured"
@@ -178,30 +225,39 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
 
         {comparison && (
           <StatStrip className="bg-well grid-cols-2 rounded-xl border sm:grid-cols-3 [&>*]:px-3 [&>*]:py-3">
-            {sideStat(`Baseline ${scoped.baselineLabel}`, comparison.baseline)}
-            {sideStat(`Candidate ${scoped.candidateLabel}`, comparison.candidate)}
+            {sideStat(scoped.baselineLabel === "base" ? "Base" : `Before · ${scoped.baselineLabel}`, comparison.baseline)}
+            {sideStat(scoped.candidateLabel === "head" ? "Head" : `After · ${scoped.candidateLabel}`, comparison.candidate)}
             <div className="min-w-0">
               <MicroLabel>Compared runs</MicroLabel>
               <div className="mt-1.5 grid gap-1 text-xs">
-                <Link to={`/runs/${comparison.baseline.run.id}`} className="hover:text-foreground text-muted-foreground truncate">base · {comparison.baseline.run.title ?? comparison.baseline.run.id}</Link>
-                <Link to={`/runs/${comparison.candidate.run.id}`} className="hover:text-foreground text-muted-foreground truncate">cand · {comparison.candidate.run.title ?? comparison.candidate.run.id}</Link>
+                <Link to={`/runs/${comparison.baseline.run.id}`} className="hover:text-foreground text-muted-foreground truncate">{scoped.baselineLabel} · {comparison.baseline.run.title ?? comparison.baseline.run.id}</Link>
+                <Link to={`/runs/${comparison.candidate.run.id}`} className="hover:text-foreground text-muted-foreground truncate">{scoped.candidateLabel} · {comparison.candidate.run.title ?? comparison.candidate.run.id}</Link>
               </div>
             </div>
           </StatStrip>
         )}
 
-        {(latestProfile || profilesAnchor) && (
-          <div className="flex flex-wrap items-center gap-2 rounded-xl border border-orange-500/25 bg-orange-500/[0.06] px-3 py-2">
-            <Flame className="size-4 text-orange-500" />
-            <span className="text-sm">{profilesAnchor ? "Profiles for this comparison" : "CPU profiles recorded"}</span>
-            <div className="ml-auto flex gap-2">
-              {profilesAnchor && <Button size="sm" variant="secondary" asChild><a href={profilesAnchor}><GitCompare /> Differential flame graph</a></Button>}
-              {latestProfile && <Button size="sm" variant="ghost" asChild><Link to={`/profiles/${latestProfile.id}`}><Flame /> Latest</Link></Button>}
-            </div>
+        <div className="-mx-4 border-b px-4">
+          <div role="tablist" aria-label="Series details" className="flex gap-4">
+            {(["summary", "samples", "measurements", "provenance"] as const).map((entry) => (
+              <button key={entry} type="button" role="tab" aria-selected={tab === entry} onClick={() => setTab(entry)}
+                className={cn("-mb-px border-b-2 py-2 text-xs font-medium capitalize transition-colors outline-none focus-visible:text-foreground",
+                  tab === entry ? "border-foreground text-foreground" : "text-muted-foreground hover:text-foreground border-transparent")}>
+                {entry}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {tab === "summary" && profilePair && <TopChanges pair={profilePair} anchor="#profile-diff" />}
+        {tab === "summary" && !profilePair && latestProfile && (
+          <div className="text-muted-foreground flex items-center gap-2 px-1 text-xs">
+            <Flame className="size-3.5 text-orange-500" /> No profiles for the compared measurements ·
+            <Link to={`/profiles/${latestProfile.id}`} className="hover:text-foreground underline underline-offset-4">latest profile of this series</Link>
           </div>
         )}
 
-        <section className="space-y-2">
+        {tab === "summary" && <section className="space-y-2">
           <SectionLabel>Per commit · representative measurements</SectionLabel>
           <Well className="px-1 pt-3 pb-1">
             <TrendChart points={trend} reference={reference?.measurement ? pick(reference.measurement) : null} statistic={statistic === "MEAN" ? "Mean" : "Median"}
@@ -209,20 +265,24 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
               steps={series.points.flatMap((point, index) => !point.spansGap && (point.vsPrevious?.verdict === "REGRESSION" || point.vsPrevious?.verdict === "IMPROVEMENT")
                 ? [{ label: columns[index], regression: point.vsPrevious.verdict === "REGRESSION" }] : [])} />
           </Well>
-        </section>
+        </section>}
 
-        {comparison && comparison.baseline.id !== comparison.candidate.id && (
+        {tab === "samples" && !(comparison && comparison.baseline.id !== comparison.candidate.id) && (
+          <p className="text-muted-foreground px-1 text-sm">Select a comparison with two measurements to see their sample distributions.</p>
+        )}
+        {tab === "samples" && comparison && comparison.baseline.id !== comparison.candidate.id && (
           <section className="space-y-2">
             <SectionLabel>Sample distribution · {scoped.baselineLabel} vs {scoped.candidateLabel}</SectionLabel>
             <Well className="px-1 pt-3 pb-1">
               {samples.isPending ? <Skeleton className="h-48" /> : (
-                <DistributionChart base={byId.get(comparison.baseline.id)?.times ?? []} head={byId.get(comparison.candidate.id)?.times ?? []} />
+                <DistributionChart base={byId.get(comparison.baseline.id)?.times ?? []} head={byId.get(comparison.candidate.id)?.times ?? []}
+                  labels={{ base: scoped.baselineLabel, head: scoped.candidateLabel }} />
               )}
             </Well>
           </section>
         )}
 
-        <section className="space-y-2">
+        {tab === "measurements" && <section className="space-y-2">
           <SectionLabel count={series.points.filter((point) => point.measurement).length}>Measurements</SectionLabel>
           <Well className="divide-y overflow-hidden">
             {series.points.map((point, index) => {
@@ -244,9 +304,9 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
             })}
           </Well>
           <p className="text-muted-foreground font-mono text-[10.5px]">value · vs reference · vs previous measured (* spans unmeasured commits) · click a row to inspect its step</p>
-        </section>
+        </section>}
 
-        {candidateDetail && (
+        {tab === "provenance" && candidateDetail && (
           <section className="space-y-2">
             <SectionLabel>Provenance · candidate {scoped.candidateLabel}</SectionLabel>
             <KeyValues rows={[
@@ -257,6 +317,11 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
               ["conditions", candidateDetail.run.conditions],
               ["environment", candidateDetail.run.environment],
             ]} />
+            <div className="flex flex-wrap gap-3 px-1 text-xs">
+              <Link to={`/benchmarks/${series.benchmark.id}?case=${encodeURIComponent(series.caseKey)}`} className="text-muted-foreground hover:text-foreground underline underline-offset-4">Full history of this series</Link>
+              <Link to={`/runs/${candidateDetail.run.id}`} className="text-muted-foreground hover:text-foreground underline underline-offset-4">Candidate run</Link>
+              {comparison && <Link to={`/runs/${comparison.baseline.run.id}`} className="text-muted-foreground hover:text-foreground underline underline-offset-4">Baseline run</Link>}
+            </div>
           </section>
         )}
       </div>

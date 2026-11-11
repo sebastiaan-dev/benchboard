@@ -1,6 +1,7 @@
 import { ArrowDown, ArrowUp, Flame } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { changeBackground, duration, percentFromRatio, verdictLabel } from "@/lib/format";
+import { duration, percentFromRatio, verdictLabel } from "@/lib/format";
+import { verdictText, verdictVar } from "@/components/kit/encodings";
 import { cn } from "@/lib/utils";
 import type { Verdict } from "@/gql/graphql";
 
@@ -131,11 +132,15 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
                           type="button"
                           onClick={() => onSelect(row.id)}
                           className={cn(
-                            "relative flex h-9 w-full min-w-20 items-center justify-center rounded-md transition-shadow hover:ring-2 hover:ring-ring/40",
+                            "bg-well relative flex h-9 w-full min-w-20 items-center justify-center rounded-md border transition-colors hover:border-foreground/25",
                             cell.isReference && "ring-1 ring-inset ring-border",
                             cell.dirty && "outline-1 outline-dashed outline-amber-500/70",
                           )}
-                          style={cell.vsReference ? { background: changeBackground(cell.vsReference.ratio, cell.vsReference.verdict) } : undefined}
+                          // Neutral cells with colored text; step changes get a 3px left accent (no large fills).
+                          style={{
+                            color: cell.vsReference ? verdictText(cell.vsReference.verdict) : undefined,
+                            boxShadow: stepMarked(step) ? `inset 3px 0 0 0 ${verdictVar[step!]}` : undefined,
+                          }}
                         >
                           {content}
                           {cell.profiled && <Flame className="absolute bottom-0.5 left-0.5 size-3 text-orange-500/80" />}
