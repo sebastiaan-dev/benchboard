@@ -77,6 +77,12 @@
         "@graphql-tools/schema": "^11.0.9",
         "graphql": "^16.11.0",
       },
+      "devDependencies": {
+        "@graphql-codegen/add": "^8.0.0",
+        "@graphql-codegen/cli": "^8.0.0",
+        "@graphql-codegen/typescript": "^7.0.1",
+        "@graphql-codegen/typescript-resolvers": "^7.0.0",
+      },
     },
   },
   "packages": {
@@ -191,6 +197,8 @@
     "@graphql-codegen/typescript": ["@graphql-codegen/typescript@7.0.1", "", { "dependencies": { "@graphql-codegen/plugin-helpers": "^8.0.0", "@graphql-codegen/schema-ast": "^7.0.0", "@graphql-codegen/visitor-plugin-common": "^8.0.1", "auto-bind": "^5.0.0", "tslib": "~2.8.0" }, "peerDependencies": { "graphql": "^16.0.0 || ^17.0.0" } }, "sha512-e0e2H+RSpA/UVl3GYYeJQoFwlXO0WGudLZ3AqvVXK9711vmkxc16g+CfHRb+3odtDSZHkIOMwvxVbioJJnzY/w=="],
 
     "@graphql-codegen/typescript-operations": ["@graphql-codegen/typescript-operations@7.0.1", "", { "dependencies": { "@graphql-codegen/plugin-helpers": "^8.0.0", "@graphql-codegen/schema-ast": "^7.0.0", "@graphql-codegen/visitor-plugin-common": "^8.0.1", "auto-bind": "^5.0.0", "tslib": "^2.8.0" }, "peerDependencies": { "graphql": "^16.0.0 || ^17.0.0", "graphql-sock": "^1.0.0" }, "optionalPeers": ["graphql-sock"] }, "sha512-qdn7Ya7TbdOkanNeZULW4rF6+q7F5dTgOX2oxE48bm+zULqSQ7UlTe3jCOVxEVKtooi6TpVNnnmhttFVB0R1EA=="],
+
+    "@graphql-codegen/typescript-resolvers": ["@graphql-codegen/typescript-resolvers@7.0.0", "", { "dependencies": { "@graphql-codegen/plugin-helpers": "^8.0.0", "@graphql-codegen/typescript": "^7.0.0", "@graphql-codegen/visitor-plugin-common": "^8.0.0", "auto-bind": "^5.0.0", "tslib": "^2.8.0" }, "peerDependencies": { "graphql": "^16.0.0 || ^17.0.0", "graphql-sock": "^1.0.0" }, "optionalPeers": ["graphql-sock"] }, "sha512-uAsHRIGCT739lc5fauOrUU7DNmOW+1BBVkoScRtSVX/8UN1p7GnmbxUOWiHjQH8wz43oYBHNcGQqgCs4rPAyiw=="],
 
     "@graphql-codegen/visitor-plugin-common": ["@graphql-codegen/visitor-plugin-common@8.0.1", "", { "dependencies": { "@graphql-codegen/plugin-helpers": "^8.0.0", "@graphql-tools/optimize": "^3.0.0", "@graphql-tools/relay-operation-optimizer": "^8.0.2", "@graphql-tools/utils": "^13.0.2", "auto-bind": "^5.0.0", "change-case-all": "^2.1.0", "dependency-graph": "^1.0.0", "graphql-tag": "^2.12.7", "parse-filepath": "^1.0.2", "tslib": "^2.8.0" }, "peerDependencies": { "graphql": "^16.0.0 || ^17.0.0" } }, "sha512-73A9w25UtegbsHgS7VH78WvVd7IoEhCNarJOuzhXqPL2Wk9yq4P7HIPjaf+hNSgUtyTv36NMSusGmjI9R3ubnA=="],
 

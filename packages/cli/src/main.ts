@@ -8,7 +8,7 @@ import {
 	Store, diffFunctions, parsePullRequestReference, functionStats, importLegacy, pullRequestReport, type Profile, type PullRequest, type PullRequestReport, type Measurement, type Comparison,
 	type Repository,
 } from "@benchboard/core";
-import { createSchema, typeDefs } from "@benchboard/graphql";
+import { createContext, createSchema, typeDefs } from "@benchboard/graphql";
 import { createServer, DEFAULT_PORT } from "./server.ts";
 import { profileRoutes } from "./profile-routes.ts";
 
@@ -392,7 +392,7 @@ export async function main(argv: string[]): Promise<number> {
 				if (rest.length !== 1) throw new Error("Usage: benchboard query <graphql|@file> [--variables json]");
 				const source = rest[0].startsWith("@") ? fs.readFileSync(rest[0].slice(1), "utf8") : rest[0];
 				const variableValues = options.variables ? JSON.parse(options.variables) : undefined;
-				const result = await graphql({ schema: createSchema(), source, variableValues, contextValue: { store, mayMutate: true } });
+				const result = await graphql({ schema: createSchema(), source, variableValues, contextValue: createContext(store, true) });
 				json(result);
 				return result.errors?.length ? 1 : 0;
 			}

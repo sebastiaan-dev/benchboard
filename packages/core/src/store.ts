@@ -582,6 +582,16 @@ export class Store {
 	profilesForMeasurement(measurementId: number): Profile[] {
 		return this.db.query(`SELECT ${PROFILE_COLUMNS} FROM profile WHERE measurement_id = ? ORDER BY id`).all(measurementId).map(toProfile);
 	}
+	/** Profiles for many measurements in one query, grouped by measurement. */
+	profilesForMeasurements(measurementIds: number[]): Map<number, Profile[]> {
+		const result = new Map<number, Profile[]>(measurementIds.map((id) => [id, []]));
+		if (!measurementIds.length) return result;
+		for (const profile of this.db.query(`SELECT ${PROFILE_COLUMNS} FROM profile WHERE measurement_id IN (SELECT value FROM json_each(?)) ORDER BY id`)
+			.all(JSON.stringify(measurementIds)).map(toProfile)) {
+			result.get(profile.measurementId)?.push(profile);
+		}
+		return result;
+	}
 	/** Profiles of the same benchmark case (any commit or run), newest first. */
 	profilesForSeries(benchmarkId: number, caseKey: string, limit = 100): Profile[] {
 		return this.db.query(`SELECT ${PROFILE_COLUMNS.replace(/(^|,\s*)(\w)/g, "$1p.$2")} FROM profile p
@@ -617,10 +627,13 @@ export class Store {
 		return (this.db.query(`SELECT count(*) AS n FROM profile p JOIN measurement m ON m.id = p.measurement_id
 			JOIN run r ON r.id = m.run_id JOIN benchmark b ON b.id = m.benchmark_id ${where}`).get(params) as { n: number }).n;
 	}
+	/** Decompressed call tree, cached until the stored data changes (trees can be several MB). */
 	profileTree(id: number): CallTree {
-		const row = this.db.query("SELECT tree FROM profile WHERE id = ?").get(id) as { tree: Uint8Array } | null;
-		if (!row) throw new Error(`Unknown profile ${id}.`);
-		return JSON.parse(new TextDecoder().decode(Bun.gunzipSync(row.tree as Uint8Array<ArrayBuffer>)));
+		return this.cached(`tree:${id}`, () => {
+			const row = this.db.query("SELECT tree FROM profile WHERE id = ?").get(id) as { tree: Uint8Array } | null;
+			if (!row) throw new Error(`Unknown profile ${id}.`);
+			return JSON.parse(new TextDecoder().decode(Bun.gunzipSync(row.tree as Uint8Array<ArrayBuffer>))) as CallTree;
+		});
 	}
 	profileFile(profile: Profile): string {
 		return path.join(this.home, "profiles", `${profile.sha256}.json.gz`);
@@ -838,6 +851,41 @@ export class Store {
 			.all(benchmarkId).map((row) => mapRow(row));
 	}
 
+	/** Case summaries for every benchmark of a repository in one query. */
+	benchmarkCasesForRepository(repositoryId: number): Map<number, { caseKey: string; count: number; lastRecordedAt: string }[]> {
+		const result = new Map<number, { caseKey: string; count: number; lastRecordedAt: string }[]>();
+		for (const row of this.db.query(`SELECT m.benchmark_id, m.case_key, count(*) AS count, max(r.recorded_at) AS last_recorded_at
+			FROM measurement m JOIN run r ON r.id = m.run_id WHERE r.repository_id = ? GROUP BY m.benchmark_id, m.case_key
+			ORDER BY m.benchmark_id, m.case_key`).all(repositoryId) as { benchmark_id: number; case_key: string; count: number; last_recorded_at: string }[]) {
+			const list = result.get(row.benchmark_id) ?? [];
+			list.push({ caseKey: row.case_key, count: row.count, lastRecordedAt: row.last_recorded_at });
+			result.set(row.benchmark_id, list);
+		}
+		return result;
+	}
+
+	/** The latest `limit` measurements of every series of a repository (chronological), in one query. */
+	recentSeriesMeasurements(repositoryId: number, limit: number): Map<string, Measurement[]> {
+		const result = new Map<string, Measurement[]>();
+		const rows = this.db.query(`SELECT * FROM (
+				SELECT ${MEASUREMENT_COLUMNS}, row_number() OVER (PARTITION BY m.benchmark_id, m.case_key ORDER BY r.recorded_at DESC, m.position) AS rank
+				FROM measurement m JOIN run r ON r.id = m.run_id WHERE r.repository_id = ?)
+			WHERE rank <= ? ORDER BY recorded_at, position`).all(repositoryId, limit) as Record<string, unknown>[];
+		for (const row of rows) {
+			delete row.rank;
+			const measurement = toMeasurement(row);
+			const key = `${measurement.benchmarkId}\0${measurement.caseKey}`;
+			result.set(key, [...result.get(key) ?? [], measurement]);
+		}
+		return result;
+	}
+
+	/** Machines by ID in one query. */
+	machines(ids: number[]): Map<number, Machine> {
+		return new Map(this.db.query("SELECT * FROM machine WHERE id IN (SELECT value FROM json_each(?))").all(JSON.stringify(ids))
+			.map((row) => { const machine = mapRow<Machine>(row); return [machine.id, machine] as const; }));
+	}
+
 	machine(id: number): Machine | undefined {
 		const row = this.db.query("SELECT * FROM machine WHERE id = ?").get(id);
 		return row ? mapRow<Machine>(row) : undefined;
@@ -881,6 +929,16 @@ export class Store {
 	runMeasurements(runId: string): Measurement[] {
 		return this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
 			WHERE m.run_id = ? ORDER BY m.position`).all(runId).map(toMeasurement);
+	}
+	/** Measurements of many runs in one query, grouped by run (in case order). */
+	measurementsForRuns(runIds: string[]): Map<string, Measurement[]> {
+		const result = new Map<string, Measurement[]>(runIds.map((id) => [id, []]));
+		if (!runIds.length) return result;
+		for (const measurement of this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id
+			WHERE m.run_id IN (SELECT value FROM json_each(?)) ORDER BY m.run_id, m.position`).all(JSON.stringify(runIds)).map(toMeasurement)) {
+			result.get(measurement.runId)?.push(measurement);
+		}
+		return result;
 	}
 	measurement(id: number): Measurement | undefined {
 		const row = this.db.query(`SELECT ${MEASUREMENT_COLUMNS} FROM measurement m JOIN run r ON r.id = m.run_id WHERE m.id = ?`).get(id);

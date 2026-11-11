@@ -3,11 +3,23 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/index.ts", "./schema.graphql": "./schema.graphql" },
-  "scripts": { "typecheck": "tsc -p ." },
+  "exports": {
+    ".": "./src/index.ts",
+    "./schema.graphql": "./schema.graphql"
+  },
+  "scripts": {
+    "typecheck": "graphql-codegen --config codegen.ts && tsc -p .",
+    "codegen": "graphql-codegen --config codegen.ts"
+  },
   "dependencies": {
     "@benchboard/core": "workspace:*",
     "@graphql-tools/schema": "^11.0.9",
     "graphql": "^16.11.0"
+  },
+  "devDependencies": {
+    "@graphql-codegen/add": "^8.0.0",
+    "@graphql-codegen/cli": "^8.0.0",
+    "@graphql-codegen/typescript": "^7.0.1",
+    "@graphql-codegen/typescript-resolvers": "^7.0.0"
   }
 }

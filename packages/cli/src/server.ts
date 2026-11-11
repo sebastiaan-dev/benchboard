@@ -2,7 +2,7 @@ import * as path from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createYoga } from "graphql-yoga";
-import { createSchema, type Context } from "@benchboard/graphql";
+import { createContext, createSchema, type Context } from "@benchboard/graphql";
 import type { Store } from "@benchboard/core";
 
 export const DEFAULT_PORT = 4319;
@@ -52,7 +52,8 @@ export function createServer(store: Store, options: { host: string; port: number
 	};
 	const yoga = createYoga<{ mayMutate: boolean }, Context>({
 		schema: createSchema(),
-		context: ({ mayMutate }) => ({ store, mayMutate }),
+		// A fresh context per request: its loaders batch and memoize lookups within that request only.
+		context: ({ mayMutate }) => createContext(store, mayMutate),
 		graphqlEndpoint: "/graphql",
 		landingPage: false,
 		logging: "warn",
