@@ -163,6 +163,7 @@ export const resolvers: Resolvers = {
 		},
 		measurements: (commit, _, { store }) => store.measurementsForCommits(commit.repositoryId, [commit.sha]),
 		pullRequests: (commit, _, { store }) => store.pullRequestsForCommit(commit.repositoryId, commit.sha),
+		positions: (commit, _, { store }) => store.commitPositions(commit.repositoryId, commit.sha),
 	},
 	PullRequest: {
 		id: (pr) => String(pr.id),

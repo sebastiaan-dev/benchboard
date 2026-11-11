@@ -5,12 +5,12 @@ import { ChevronLeft, ChevronRight, Flame, GitCompare, LineChart } from "lucide-
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DistributionChart, TrendChart, type TrendPoint } from "@/components/bench/series-charts";
+import { PairedStrip, TrendChart, type TrendPoint } from "@/components/bench/series-charts";
 import { VerdictBadge } from "@/components/bench/states";
 import { KeyValues, MicroLabel, Panel, PanelHeader, SectionLabel, Stat, StatStrip, Well } from "@/components/kit/panel";
 import { Segmented, WideInterval, verdictText } from "@/components/kit/encodings";
 import { useGraphQL } from "@/lib/graphql";
-import { duration, percentFromRatio } from "@/lib/format";
+import { duration, percentFromRatio, referenceName } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { Statistic } from "@/gql/graphql";
 import type { Report, Series } from "@/pages/pull-request";
@@ -182,7 +182,7 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
             value={scope.kind}
             onChange={(entry) => onScopeChange(entry === "head" ? { kind: "head" } : { kind: "step", position: steps.at(-1)?.position ?? 0 })}
             options={[
-              { value: "head", label: series.head ? "Head vs reference" : "Latest vs reference" },
+              { value: "head", label: `${series.head ? "Head" : "Latest"} vs ${series.referenceIsBase ? "base" : "first"}` },
               ...(steps.length ? [{ value: "step" as const, label: "Commit step" }] : []),
             ]}
           />
@@ -273,12 +273,13 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
         {tab === "samples" && comparison && comparison.baseline.id !== comparison.candidate.id && (
           <section className="space-y-2">
             <SectionLabel>Sample distribution · {scoped.baselineLabel} vs {scoped.candidateLabel}</SectionLabel>
-            <Well className="px-1 pt-3 pb-1">
-              {samples.isPending ? <Skeleton className="h-48" /> : (
-                <DistributionChart base={byId.get(comparison.baseline.id)?.times ?? []} head={byId.get(comparison.candidate.id)?.times ?? []}
+            <Well className="px-3 pt-4 pb-2">
+              {samples.isPending ? <Skeleton className="h-28" /> : (
+                <PairedStrip base={byId.get(comparison.baseline.id)?.times ?? []} head={byId.get(comparison.candidate.id)?.times ?? []}
                   labels={{ base: scoped.baselineLabel, head: scoped.candidateLabel }} />
               )}
             </Well>
+            <p className="text-muted-foreground px-1 text-[11px]">Every timed iteration; shaded bands are interquartile ranges, ticks are medians.</p>
           </section>
         )}
 
@@ -296,14 +297,14 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
                   <span className="font-mono">{columns[index]}{m?.dirty ? "*" : ""}</span>
                   <span className="text-muted-foreground truncate">{m ? m.run.title ?? m.run.id : report.commits[index].commit.subject}</span>
                   <span className="text-right font-mono tabular-nums">{m ? duration(pick(m)) : "—"}</span>
-                  <span className="text-right">{point.position === series.reference?.position ? <span className="text-muted-foreground font-mono">ref</span> : <Change comparison={point.vsReference} />}</span>
+                  <span className="text-right">{point.position === series.reference?.position ? <span className="text-muted-foreground font-mono">{series.referenceIsBase ? "base" : "ref"}</span> : <Change comparison={point.vsReference} />}</span>
                   <span className="text-right"><Change comparison={point.vsPrevious} />{point.spansGap && <span className="text-muted-foreground">*</span>}</span>
                   {m?.profiles.length ? <Flame className="size-3.5 text-orange-500" /> : <span />}
                 </button>
               );
             })}
           </Well>
-          <p className="text-muted-foreground font-mono text-[10.5px]">value · vs reference · vs previous measured (* spans unmeasured commits) · click a row to inspect its step</p>
+          <p className="text-muted-foreground font-mono text-[10.5px]">value · vs {referenceName(series)} · vs previous measured (* spans unmeasured commits) · click a row to inspect its step</p>
         </section>}
 
         {tab === "provenance" && candidateDetail && (

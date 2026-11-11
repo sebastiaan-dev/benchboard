@@ -43,7 +43,7 @@ const RepositoryPageQueryDocument = graphql(`
       runs(limit: $runs, offset: $runOffset, search: $runSearch) { ...RunRow }
       profiles(limit: $profiles, offset: $profileOffset, search: $profileSearch) {
         id label cpuMs samples symbolicatedShare recordedAt
-        measurement { id caseKey commitSha dirty benchmark { id key } run { id title machine { hostname } } }
+        measurement { id caseKey commitSha dirty median commit { subject positions { position } } benchmark { id key } run { id title machine { hostname } } }
       }
     }
   }
@@ -311,51 +311,72 @@ function BenchmarkBrowser({ repository }: { repository: Repository }) {
 }
 
 // Names keep their space first; secondary columns appear as the card widens (container queries).
-const COMPACT_GRID = "grid-cols-[minmax(8rem,1fr)_5rem] @sm:grid-cols-[minmax(8rem,1fr)_5rem_5.5rem] @md:grid-cols-[minmax(8rem,1fr)_4.5rem_5rem_5.5rem]";
-const SELECTABLE_GRID = "grid-cols-[1.25rem_minmax(8rem,1fr)_5rem] @sm:grid-cols-[1.25rem_minmax(8rem,1fr)_5rem_5.5rem] @md:grid-cols-[1.25rem_minmax(8rem,1fr)_4.5rem_5rem_5.5rem] @lg:grid-cols-[1.25rem_minmax(8rem,1fr)_4.5rem_5rem_4rem_5.5rem]";
+const PROFILE_GRID = "grid-cols-[1.25rem_minmax(8rem,1fr)_5rem] @md:grid-cols-[1.25rem_minmax(8rem,1fr)_5rem_5rem] @xl:grid-cols-[1.25rem_minmax(8rem,1fr)_5rem_5rem_4rem_5.5rem]";
 
-function ProfileRows({ repository, selectable = false }: { repository: Repository; selectable?: boolean }) {
+/** Profiles grouped by series; each row is a commit (position, SHA, subject). Two selections open a comparison. */
+function ProfileRows({ repository }: { repository: Repository }) {
   const [selected, setSelected] = useState<string[]>([]);
   const navigate = useNavigate();
   if (!repository.profiles.length) {
     return <EmptyState title="No profiles yet">Attach samply profiles with <code>benchboard profile attach &lt;run&gt;:&lt;case&gt; profile.json.gz</code>.</EmptyState>;
   }
   const toggle = (id: string) => setSelected((current) => current.includes(id) ? current.filter((entry) => entry !== id) : [...current.slice(-1), id]);
+  const groups = [...Map.groupBy(repository.profiles, (profile) => `${profile.measurement.benchmark.key}\0${profile.measurement.caseKey}`).values()];
+  const chosen = repository.profiles.filter((profile) => selected.includes(profile.id)).reverse();
+  const position = (profile: (typeof repository.profiles)[number]) => {
+    const value = profile.measurement.commit?.positions[0]?.position;
+    return value === undefined || value < 0 ? null : value === 0 ? "base" : `#${value}`;
+  };
   return (
     <div className="@container px-2 pb-2">
-      {selectable && (
-        <div className="flex items-center gap-3 px-3 pb-2">
-          <span className="text-muted-foreground text-xs">{selected.length ? `${selected.length} of 2 selected (older is base)` : "Select two profiles to compare"}</span>
-          <Button size="sm" className="ml-auto" disabled={selected.length !== 2} onClick={() => {
-            const [a, b] = repository.profiles.filter((profile) => selected.includes(profile.id)).reverse();
-            navigate(`/profiles/compare?base=${a.id}&head=${b.id}`);
-          }}><GitCompare /> Compare</Button>
-        </div>
-      )}
-      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 text-xs", selectable ? SELECTABLE_GRID : COMPACT_GRID)}>
-        {selectable && <span />}<span>Series</span><span className="hidden @md:block">Commit</span><span className="text-right">CPU / iter</span>
-        {selectable && <span className="hidden text-right @lg:block">Symbols</span>}<span className="hidden text-right @sm:block">Recorded</span>
+      <div className={cn("text-muted-foreground grid gap-4 px-3 pb-1.5 text-xs", PROFILE_GRID)}>
+        <span /><span>Commit</span><span className="text-right">On-CPU</span><span className="hidden text-right @md:block">Wall (p50)</span>
+        <span className="hidden text-right @xl:block">Symbols</span><span className="hidden text-right @xl:block">Recorded</span>
       </div>
-      {repository.profiles.map((profile) => {
-        const m = profile.measurement;
+      {groups.map((group) => {
+        const m0 = group[0].measurement;
         return (
-          <div key={profile.id} className={cn("hover:bg-accent/50 grid items-center gap-4 rounded-lg px-3 py-2",
-            selectable ? SELECTABLE_GRID : COMPACT_GRID, selected.includes(profile.id) && "bg-accent")}>
-            {selectable && <Checkbox checked={selected.includes(profile.id)} onCheckedChange={() => toggle(profile.id)} aria-label="Select profile" />}
-            <Link to={`/profiles/${profile.id}`} className="flex min-w-0 items-center gap-2.5">
-              <Flame className="size-3.5 shrink-0 text-orange-500" />
-              <span className="min-w-0">
-                <span className="text-muted-foreground block truncate font-mono text-[11px]">{m.benchmark.key}{profile.label ? ` · ${profile.label}` : ""}</span>
-                <span className="block truncate text-sm">{m.caseKey === "default" ? seriesName(m.benchmark.key, m.caseKey) : m.caseKey}</span>
-              </span>
-            </Link>
-            <span className="hidden font-mono text-xs @md:block">{m.commitSha?.slice(0, 7) ?? "—"}{m.dirty ? "*" : ""}</span>
-            <span className="text-right font-mono text-sm tabular-nums">{profile.cpuMs >= 1000 ? `${(profile.cpuMs / 1000).toFixed(2)} s` : `${profile.cpuMs.toFixed(1)} ms`}</span>
-            {selectable && <span className="text-muted-foreground hidden text-right font-mono text-xs @lg:block">{(profile.symbolicatedShare * 100).toFixed(0)}%</span>}
-            <span className="text-muted-foreground hidden text-right text-xs @sm:block" title={dateTime(profile.recordedAt)}>{relativeTime(profile.recordedAt)}</span>
+          <div key={`${m0.benchmark.id}:${m0.caseKey}`} className="mb-1">
+            <div className="flex items-center gap-2 px-3 pt-2 pb-1">
+              <Flame className="size-3.5 text-orange-500" />
+              <Link to={`/benchmarks/${m0.benchmark.id}?case=${encodeURIComponent(m0.caseKey)}`} className="truncate text-sm font-medium hover:underline">
+                {seriesName(m0.benchmark.key, m0.caseKey)}
+              </Link>
+              <span className="text-muted-foreground font-mono text-[11px]">{group.length} profile{group.length === 1 ? "" : "s"}</span>
+            </div>
+            {group.map((profile) => {
+              const m = profile.measurement;
+              return (
+                <div key={profile.id} className={cn("hover:bg-accent/50 grid items-center gap-4 rounded-lg px-3 py-1.5", PROFILE_GRID, selected.includes(profile.id) && "bg-accent")}>
+                  <Checkbox checked={selected.includes(profile.id)} onCheckedChange={() => toggle(profile.id)} aria-label={`Select profile at ${m.commitSha?.slice(0, 7)}`} />
+                  <Link to={`/profiles/${profile.id}`} className="flex min-w-0 items-baseline gap-2">
+                    {position(profile) && <span className="text-muted-foreground font-mono text-[11px]">{position(profile)}</span>}
+                    <span className="font-mono text-xs">{m.commitSha?.slice(0, 7) ?? "—"}{m.dirty ? "*" : ""}</span>
+                    <span className="text-muted-foreground truncate text-xs">{m.commit?.subject ?? m.run.title}</span>
+                    {profile.label && <span className="text-muted-foreground/70 shrink-0 text-[11px]">{profile.label}</span>}
+                  </Link>
+                  <span className="text-right font-mono text-sm tabular-nums">{profile.cpuMs >= 1000 ? `${(profile.cpuMs / 1000).toFixed(2)} s` : `${profile.cpuMs.toFixed(1)} ms`}</span>
+                  <span className="text-muted-foreground hidden text-right font-mono text-xs @md:block">{duration(m.median)}</span>
+                  <span className="text-muted-foreground hidden text-right font-mono text-xs @xl:block">{(profile.symbolicatedShare * 100).toFixed(0)}%</span>
+                  <span className="text-muted-foreground hidden text-right text-xs @xl:block" title={dateTime(profile.recordedAt)}>{relativeTime(profile.recordedAt)}</span>
+                </div>
+              );
+            })}
           </div>
         );
       })}
+      {selected.length > 0 && (
+        // Sticky action bar, as in the references' multi-select tables.
+        <div className="bg-popover sticky bottom-4 z-10 mx-auto mt-3 flex w-fit items-center gap-3 rounded-xl border px-3 py-2 shadow-lg">
+          <span className="text-sm">{selected.length} selected</span>
+          {chosen.length === 2
+            ? <Button size="sm" onClick={() => navigate(`/profiles/compare?base=${chosen[0].id}&head=${chosen[1].id}`)}>
+                <GitCompare /> Compare {position(chosen[0]) ?? chosen[0].measurement.commitSha?.slice(0, 7)} → {position(chosen[1]) ?? chosen[1].measurement.commitSha?.slice(0, 7)}
+              </Button>
+            : <span className="text-muted-foreground text-xs">select one more to compare (older is the base)</span>}
+          <Button size="sm" variant="ghost" onClick={() => setSelected([])}>Clear</Button>
+        </div>
+      )}
     </div>
   );
 }
@@ -505,7 +526,7 @@ export function ProfilesPage() {
         <PanelHeader icon={Flame} title="Profiles"
           subtitle={`${list.search ? `${repository.matchingProfiles} of ` : ""}${repository.profileCount} samply profiles · select two to compare`}
           actions={<SearchBox value={list.text} onChange={list.setText} placeholder="Benchmark, case, label, SHA…" />} />
-        <ProfileRows repository={repository} selectable />
+        <ProfileRows repository={repository} />
         <Pager offset={list.offset} size={PROFILE_PAGE} total={repository.matchingProfiles} onChange={list.setOffset} />
       </Panel>
     </div>

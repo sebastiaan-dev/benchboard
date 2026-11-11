@@ -48,14 +48,19 @@ export function ProfilePage() {
   const scale = 1 / profile.iterations;
   const viewTotal = metricTotal(threads.view, metric) || 1;
   const repository = m.benchmark.repository;
+  // The PR this commit belongs to (most recently synced), for context and navigation.
+  const placement = m.commit?.positions.find((entry) => entry.position >= 0) ?? null;
   const maxSelf = Math.max(1, ...stats.slice(0, rows).map((stat) => stat[sort]));
 
   return (
     <div className="space-y-5">
       <Crumbs items={[
         { label: repository.name, to: `/repositories/${repository.id}` },
-        { label: "Profiles", to: `/repositories/${repository.id}/profiles` },
-        { label: `${seriesName(m.benchmark.key, m.caseKey)} @ ${m.commitSha?.slice(0, 7) ?? "?"}` },
+        ...(placement
+          ? [{ label: placement.pullRequest.number ? `#${placement.pullRequest.number}` : placement.pullRequest.headRef, to: `/pr/${placement.pullRequest.id}` },
+            { label: seriesName(m.benchmark.key, m.caseKey), to: `/pr/${placement.pullRequest.id}?series=${encodeURIComponent(`${placement.pullRequest.id}:${m.benchmark.id}:${m.caseKey}`)}` }]
+          : [{ label: "Profiles", to: `/repositories/${repository.id}/profiles` }, { label: seriesName(m.benchmark.key, m.caseKey), to: `/benchmarks/${m.benchmark.id}?case=${encodeURIComponent(m.caseKey)}` }]),
+        { label: `${placement ? (placement.position === 0 ? "base" : `#${placement.position}`) : ""} ${m.commitSha?.slice(0, 7) ?? "?"}`.trim() },
       ]} />
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex min-w-0 items-start gap-3">
@@ -66,7 +71,9 @@ export function ProfilePage() {
               {profile.label && <Pill>{profile.label}</Pill>}
             </div>
             <p className="text-muted-foreground truncate font-mono text-xs">
+              {placement && <>{placement.position === 0 ? "base" : `#${placement.position}`} of <Link to={`/pr/${placement.pullRequest.id}`} className="hover:text-foreground underline-offset-4 hover:underline">{placement.pullRequest.title}</Link> · </>}
               {m.commit?.shortSha.slice(0, 7) ?? "no commit"}{m.dirty ? "+dirty" : ""}{m.commit?.subject ? ` · ${m.commit.subject}` : ""} · {m.run.machine.hostname} · {dateTime(profile.recordedAt)} · <Link to={`/runs/${m.run.id}`} className="hover:text-foreground underline-offset-4 hover:underline">{m.run.title ?? m.run.id}</Link>
+              {" · "}<Link to={`/benchmarks/${m.benchmark.id}?case=${encodeURIComponent(m.caseKey)}`} className="hover:text-foreground underline-offset-4 hover:underline">series history</Link>
             </p>
           </div>
         </div>

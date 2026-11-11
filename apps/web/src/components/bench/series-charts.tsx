@@ -3,6 +3,7 @@ import { EvilComposedChart } from "@/components/evilcharts/charts/recharts-compo
 import { ChartContainer, type ChartConfig } from "@/components/evilcharts/ui/recharts-chart";
 import { ChartTooltip } from "@/components/evilcharts/ui/recharts-tooltip";
 import { duration, durationScale } from "@/lib/format";
+import { useElementWidth } from "@/components/kit/encodings";
 
 export interface TrendPoint {
   position: number;
@@ -130,47 +131,64 @@ export function SamplesChart({ sets, commits }: { sets: SampleSet[]; commits: { 
   );
 }
 
-
-const distributionConfig = {
-  base: { label: "Reference", colors: { light: ["#a3a3a3"], dark: ["#6b6b73"] } },
-  head: { label: "Head", colors: { light: ["#2563eb"], dark: ["#7ea6f6"] } },
-} satisfies ChartConfig;
-
-/** Overlaid histograms (share of samples per bin) for the reference and head, with median markers. */
-export function DistributionChart({ base, head, bins = 24, labels = { base: "base", head: "head" } }: {
-  base: number[]; head: number[]; bins?: number; labels?: { base: string; head: string };
+/**
+ * Two-row strip plot of every sample (base above head) on a shared axis, with each side's IQR band
+ * and median tick. Unlike overlaid histograms it stays readable when the distributions do not overlap.
+ */
+export function PairedStrip({ base, head, labels = { base: "base", head: "head" } }: {
+  base: number[]; head: number[]; labels?: { base: string; head: string };
 }) {
-  const all = [...base, ...head].sort((a, b) => a - b);
+  const [ref, width] = useElementWidth<HTMLDivElement>();
+  const all = [...base, ...head];
   if (!all.length) return null;
-  // Trim the outer 1% so a single outlier does not flatten the histogram.
-  const lo = all[Math.floor(all.length * 0.01)];
-  const hi = all[Math.min(all.length - 1, Math.ceil(all.length * 0.99) - 1)];
-  const width = (hi - lo) / bins || hi * 0.01 || 1;
+  const lo = Math.min(...all), hi = Math.max(...all);
+  const pad = (hi - lo) * 0.06 || hi * 0.02 || 1e-6;
+  const min = lo - pad, max = hi + pad;
   const { scale, unit } = durationScale(hi);
-  const count = (values: number[]) => {
-    const histogram = new Array(bins).fill(0);
-    for (const value of values) histogram[Math.min(bins - 1, Math.max(0, Math.floor((value - lo) / width)))]++;
-    return histogram.map((n) => (values.length ? (n / values.length) * 100 : 0));
+  const left = 56, right = 12, row = 46, top = 16;
+  const inner = Math.max(10, width - left - right);
+  const x = (value: number) => left + ((value - min) / (max - min)) * inner;
+  const quantile = (values: number[], p: number) => {
+    const sorted = [...values].sort((a, b) => a - b);
+    const index = (sorted.length - 1) * p;
+    const floor = Math.floor(index);
+    return sorted[floor] + (sorted[Math.ceil(index)] - sorted[floor]) * (index - floor);
   };
-  const a = count(base), b = count(head);
-  const median = (values: number[]) => {
-    const sorted = [...values].sort((x, y) => x - y);
-    return sorted.length ? sorted[Math.floor(sorted.length / 2)] : null;
-  };
-  const label = (index: number) => `${+((lo + (index + 0.5) * width) * scale).toPrecision(3)}`;
-  const binOf = (value: number | null) => value === null ? null : label(Math.min(bins - 1, Math.max(0, Math.floor((value - lo) / width))));
-  const data = a.map((share, index) => ({ bin: label(index), base: share, head: b[index] }));
-  const mb = binOf(median(base)), mh = binOf(median(head));
+  const ticks = Array.from({ length: 5 }, (_, index) => min + ((max - min) * index) / 4);
+  const rows = [
+    { key: "base", values: base, label: labels.base, color: "var(--muted-foreground)" },
+    { key: "head", values: head, label: labels.head, color: "var(--info)" },
+  ];
   return (
-    <EvilComposedChart className="aspect-auto h-48 w-full" data={data} config={distributionConfig} animationType="none" barGap={-8}
-      chartProps={{ margin: { left: 0, right: 8, top: 14, bottom: 0 } }}>
-      <EvilComposedChart.Grid />
-      <EvilComposedChart.XAxis dataKey="bin" tick={{ fontSize: 10, fontFamily: "var(--font-mono)" }} interval="preserveStartEnd" unit={` ${unit}`} />
-      <EvilComposedChart.YAxis tickFormatter={(value: number) => `${Math.round(value)}%`} width={44} />
-      {mb && <ReferenceLine x={mb} stroke="var(--muted-foreground)" strokeDasharray="3 3" label={{ value: `${labels.base} p50`, position: "top", fill: "var(--muted-foreground)", fontSize: 10 }} />}
-      {mh && <ReferenceLine x={mh} stroke="var(--color-head-0)" strokeDasharray="3 3" label={{ value: `${labels.head} p50`, position: "top", fill: "var(--color-head-0)", fontSize: 10 }} />}
-      <EvilComposedChart.Bar dataKey="base" />
-      <EvilComposedChart.Bar dataKey="head" />
-    </EvilComposedChart>
+    <div ref={ref} className="w-full">
+      {width > 0 && (
+        <svg width={width} height={top + rows.length * row + 34} className="overflow-visible">
+          {ticks.map((tick) => (
+            <g key={tick}>
+              <line x1={x(tick)} x2={x(tick)} y1={top} y2={top + rows.length * row + 12} stroke="var(--border)" strokeDasharray="3 3" />
+              <text x={x(tick)} y={top + rows.length * row + 26} textAnchor="middle" fontSize={10} fill="var(--muted-foreground)" fontFamily="var(--font-mono)">
+                {+(tick * scale).toPrecision(3)} {unit}
+              </text>
+            </g>
+          ))}
+          {rows.map((entry, index) => {
+            const y = top + index * row + row / 2;
+            if (!entry.values.length) return null;
+            const q1 = quantile(entry.values, 0.25), q3 = quantile(entry.values, 0.75), median = quantile(entry.values, 0.5);
+            return (
+              <g key={entry.key}>
+                <text x={0} y={y + 4} fontSize={11} fill="var(--muted-foreground)" fontFamily="var(--font-mono)">{entry.label}</text>
+                <rect x={x(q1)} width={Math.max(2, x(q3) - x(q1))} y={y - 11} height={22} rx={5} fill={entry.color} fillOpacity={0.12} />
+                {entry.values.map((value, sample) => (
+                  <circle key={sample} cx={x(value)} cy={y + jitter(sample + index * 7919) * 28} r={2.4} fill={entry.color} fillOpacity={0.65} />
+                ))}
+                <line x1={x(median)} x2={x(median)} y1={y - 14} y2={y + 14} stroke={entry.color} strokeWidth={2} />
+                <text x={x(median)} y={index === 0 ? y - 17 : y + 25} textAnchor="middle" fontSize={10} fill={entry.color} fontFamily="var(--font-mono)">p50 {duration(median)}</text>
+              </g>
+            );
+          })}
+        </svg>
+      )}
+    </div>
   );
 }

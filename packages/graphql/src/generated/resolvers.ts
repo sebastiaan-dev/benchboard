@@ -56,11 +56,19 @@ export type Commit = {
   committedAt?: Maybe<Scalars['String']['output']>;
   measurements: Array<Measurement>;
   parents: Array<Scalars['String']['output']>;
+  /** Position of this commit in each tracked pull request (0 = base). */
+  positions: Array<CommitPosition>;
   pullRequests: Array<PullRequest>;
   sha: Scalars['String']['output'];
   shortSha: Scalars['String']['output'];
   subject?: Maybe<Scalars['String']['output']>;
   url?: Maybe<Scalars['String']['output']>;
+};
+
+export type CommitPosition = {
+  __typename?: 'CommitPosition';
+  position: Scalars['Int']['output'];
+  pullRequest: PullRequest;
 };
 
 /** Every figure for a comparison (durations, distributions, provenance, profiles) comes from candidate and baseline. */
@@ -707,6 +715,7 @@ export type ResolversTypes = {
   BenchmarkCase: ResolverTypeWrapper<CaseParentModel>;
   Boolean: ResolverTypeWrapper<Scalars['Boolean']['output']>;
   Commit: ResolverTypeWrapper<CommitModel>;
+  CommitPosition: ResolverTypeWrapper<Omit<CommitPosition, 'pullRequest'> & { pullRequest: ResolversTypes['PullRequest'] }>;
   Comparison: ResolverTypeWrapper<ComparisonModel>;
   CpuSource: null;
   Float: ResolverTypeWrapper<Scalars['Float']['output']>;
@@ -748,6 +757,7 @@ export type ResolversParentTypes = {
   BenchmarkCase: CaseParentModel;
   Boolean: Scalars['Boolean']['output'];
   Commit: CommitModel;
+  CommitPosition: Omit<CommitPosition, 'pullRequest'> & { pullRequest: ResolversParentTypes['PullRequest'] };
   Comparison: ComparisonModel;
   Float: Scalars['Float']['output'];
   ID: Scalars['ID']['output'];
@@ -798,11 +808,17 @@ export type CommitResolvers<ContextType = Context, ParentType extends ResolversP
   committedAt?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   measurements?: Resolver<Array<ResolversTypes['Measurement']>, ParentType, ContextType>;
   parents?: Resolver<Array<ResolversTypes['String']>, ParentType, ContextType>;
+  positions?: Resolver<Array<ResolversTypes['CommitPosition']>, ParentType, ContextType>;
   pullRequests?: Resolver<Array<ResolversTypes['PullRequest']>, ParentType, ContextType>;
   sha?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   shortSha?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   subject?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   url?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
+};
+
+export type CommitPositionResolvers<ContextType = Context, ParentType extends ResolversParentTypes['CommitPosition'] = ResolversParentTypes['CommitPosition']> = {
+  position?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  pullRequest?: Resolver<ResolversTypes['PullRequest'], ParentType, ContextType>;
 };
 
 export type ComparisonResolvers<ContextType = Context, ParentType extends ResolversParentTypes['Comparison'] = ResolversParentTypes['Comparison']> = {
@@ -1106,6 +1122,7 @@ export type Resolvers<ContextType = Context> = {
   Benchmark?: BenchmarkResolvers<ContextType>;
   BenchmarkCase?: BenchmarkCaseResolvers<ContextType>;
   Commit?: CommitResolvers<ContextType>;
+  CommitPosition?: CommitPositionResolvers<ContextType>;
   Comparison?: ComparisonResolvers<ContextType>;
   CpuSource?: CpuSourceResolvers;
   JSON?: GraphQLScalarType;

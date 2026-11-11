@@ -112,6 +112,8 @@ test("end to end: ingest a commit sweep, track the branch and report regressions
 	assert.equal(pr.baseSha, base);
 	assert.deepEqual(store.pullRequestCommits(pr.id).map((commit) => commit.sha), shas);
 	assert.equal(store.repository(pr.repositoryId)!.slug, "github.com/example/project");
+	assert.deepEqual(store.commitPositions(pr.repositoryId, base).map((entry) => entry.position), [0]);
+	assert.deepEqual(store.commitPositions(pr.repositoryId, shas[1]).map((entry) => [entry.pullRequest.id, entry.position]), [[pr.id, 2]]);
 
 	// One Hyperfine run sweeping base + all commits for two workloads.
 	const centers = [1.0, 1.0, 0.8, 1.2];

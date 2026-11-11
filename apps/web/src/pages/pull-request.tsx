@@ -17,7 +17,7 @@ import { Command } from "@/components/kit/onboarding";
 import { MicroLabel, Panel, PanelHeader, Stat, StatStrip } from "@/components/kit/panel";
 import { IntervalGlyph, Pill, SegmentedBar, Segmented, Sparkline, Ticks, verdictText, verdictVar, type Tick } from "@/components/kit/encodings";
 import { useGraphQL, useGraphQLMutation } from "@/lib/graphql";
-import { percentFromRatio, relativeTime, verdictLabel } from "@/lib/format";
+import { percentFromRatio, referenceName, relativeTime, verdictLabel } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import type { PullRequestReportQuery as ReportResult, Statistic, Verdict } from "@/gql/graphql";
 import { PullRequestReportQuery, SyncPullRequestMutation } from "./pull-request.queries";
@@ -52,10 +52,10 @@ export function seriesTicks(series: Series, columns: { position: number; label: 
         <div className="grid gap-0.5">
           <span className="font-mono">{columns[index].label}{point.measurement?.dirty ? " +dirty" : ""}</span>
           <span className="opacity-70">{columns[index].subject}</span>
-          {!point.measurement ? <span>not measured</span> : isReference ? <span>reference</span> : point.vsPrevious ? (
+          {!point.measurement ? <span>not measured</span> : isReference ? <span>{series.referenceIsBase ? "base · changes are relative to this" : "first measured · changes are relative to this"}</span> : point.vsPrevious ? (
             <span>step {percentFromRatio(point.vsPrevious.ratio, 1)} vs {point.previousPosition === 0 ? "base" : `#${point.previousPosition}`} · {verdictLabel[point.vsPrevious.verdict].toLowerCase()}{point.spansGap ? " (spans unmeasured commits)" : ""}</span>
           ) : null}
-          {point.vsReference && <span className="text-muted-foreground">{percentFromRatio(point.vsReference.ratio, 1)} vs reference</span>}
+          {point.vsReference && <span className="text-muted-foreground">{percentFromRatio(point.vsReference.ratio, 1)} vs {referenceName(series)}</span>}
         </div>
       ),
     };
@@ -483,7 +483,7 @@ export function PullRequestPage() {
                     detail: series.benchmark.title ?? series.label,
                     cells: series.points.map((point) => ({
                       value: point.measurement ? value(statistic, point.measurement) : null, dirty: point.measurement?.dirty ?? false,
-                      isReference: series.reference?.position === point.position, vsReference: point.vsReference, vsPrevious: point.vsPrevious,
+                      isReference: series.reference?.position === point.position, referenceName: referenceName(series), vsReference: point.vsReference, vsPrevious: point.vsPrevious,
                       extra: Math.max(0, point.candidates.length - 1), profiled: (point.measurement?.profiles.length ?? 0) > 0,
                       spansGap: point.spansGap,
                     })),

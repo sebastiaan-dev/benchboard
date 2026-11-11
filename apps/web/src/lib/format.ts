@@ -43,6 +43,16 @@ export function relativeTime(iso: string | null | undefined): string {
   return format.format(Math.round(seconds), "second");
 }
 
+/** Compact mono-friendly timestamp: "11-04 10:00" this year, "2025-11-04" otherwise. */
+export function shortDate(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return date.getFullYear() === new Date().getFullYear()
+    ? `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
+    : `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
 export function dateTime(iso: string | null | undefined): string {
   return iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "—";
 }
@@ -100,4 +110,13 @@ export function primaryMachine<T extends { dirty: boolean | null; status: string
     if (counts.has(id) && (best === undefined || counts.get(id)! >= counts.get(best)!)) best = id;
   }
   return best ?? measurements.at(-1)?.run.machine.id;
+}
+
+/**
+ * What a series' changes are measured against: the PR base when it was measured, otherwise the first
+ * measured PR commit. Used consistently in labels instead of the internal word "reference".
+ */
+export function referenceName(series: { referenceIsBase: boolean; reference?: { position: number } | null }): string {
+  if (series.referenceIsBase) return "base";
+  return series.reference ? `#${series.reference.position} (first measured)` : "first measured";
 }

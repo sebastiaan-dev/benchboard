@@ -228,7 +228,7 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
   const description = describedNode ? (diff && describedNode.base !== undefined
     ? `${describedNode.name}${describedNode.library ? ` in ${describedNode.library}` : ""}: base ${ms(describedNode.base)}, head ${ms(describedNode.head)}, change ${ms((describedNode.head ?? 0) - describedNode.base)}.`
     : `${describedNode.name}${describedNode.library ? ` in ${describedNode.library}` : ""}: total ${ms(describedNode.value)} (${pct(describedNode.value)}), self ${ms(describedNode.self)}.`)
-    : `Showing ${focus.name}: ${ms(focus.value)}.`;
+    : "Hover a frame, or focus the graph and use the arrow keys, to see its time.";
 
   return (
     <div className={cn("space-y-2", className)}>

@@ -57,6 +57,13 @@ type Commit {
   url: String
   measurements: [Measurement!]!
   pullRequests: [PullRequest!]!
+  "Position of this commit in each tracked pull request (0 = base)."
+  positions: [CommitPosition!]!
+}
+
+type CommitPosition {
+  pullRequest: PullRequest!
+  position: Int!
 }
 
 enum PullRequestSource {

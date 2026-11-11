@@ -17,6 +17,8 @@ export interface MatrixCell {
   value: number | null;
   dirty: boolean;
   isReference: boolean;
+  /** Human name of what vsReference compares against, e.g. "base". */
+  referenceName: string;
   vsReference: MatrixComparison | null;
   vsPrevious: MatrixComparison | null;
   extra: number;
@@ -155,8 +157,8 @@ export function CommitMatrix({ columns, rows, onSelect }: { columns: MatrixColum
                         <div className="font-medium">{row.name} @ {column.label}</div>
                         {cell.value === null ? <div className="opacity-70">Not measured at this commit</div> : <>
                           <div className="flex justify-between gap-4"><span className="opacity-70">Value</span><span className="font-mono">{duration(cell.value)}{cell.dirty ? " (dirty build)" : ""}</span></div>
-                          {cell.isReference && <div className="opacity-70">Reference for this series</div>}
-                          {cell.vsReference && <ComparisonLine title="vs reference" comparison={cell.vsReference} />}
+                          {cell.isReference && <div className="opacity-70">Changes in this row are relative to this commit</div>}
+                          {cell.vsReference && <ComparisonLine title={`vs ${cell.referenceName}`} comparison={cell.vsReference} />}
                           {cell.vsPrevious && <ComparisonLine title="vs previous" comparison={cell.vsPrevious} />}
                           {cell.profiled && <div className="opacity-70">CPU profile attached</div>}
                           {cell.extra > 0 && <div className="opacity-70">{cell.extra} more measurement{cell.extra > 1 ? "s" : ""} at this commit</div>}

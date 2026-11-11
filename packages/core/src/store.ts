@@ -834,6 +834,15 @@ export class Store {
 			.all(repositoryId, sha, sha).map((row) => mapRow<PullRequest>(row));
 	}
 
+	/** Where a commit sits in each tracked PR: 0 for the base, 1… for PR commits. */
+	commitPositions(repositoryId: number, sha: string): { pullRequest: PullRequest; position: number }[] {
+		return this.pullRequestsForCommit(repositoryId, sha).map((pullRequest) => {
+			if (pullRequest.baseSha === sha) return { pullRequest, position: 0 };
+			const row = this.db.query("SELECT position FROM pull_request_commit WHERE pull_request_id = ? AND sha = ?").get(pullRequest.id, sha) as { position: number } | null;
+			return { pullRequest, position: row?.position ?? -1 };
+		});
+	}
+
 	benchmarks(repositoryId: number): Benchmark[] {
 		return this.db.query("SELECT * FROM benchmark WHERE repository_id = ? ORDER BY key").all(repositoryId).map((row) => mapRow<Benchmark>(row));
 	}

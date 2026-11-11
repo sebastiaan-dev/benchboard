@@ -34,7 +34,7 @@ export const ProfileHeaderFields = graphql(`
       commitSha
       dirty
       median
-      commit { shortSha subject url }
+      commit { shortSha subject url positions { position pullRequest { id title number source headRef } } }
       benchmark { id key title repository { id slug name } }
       run { id title recordedAt machine { hostname cpu } }
     }

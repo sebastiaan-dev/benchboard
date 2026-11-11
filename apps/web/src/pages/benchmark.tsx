@@ -11,7 +11,7 @@ import { Crumbs, useRepositoryScope } from "@/components/shell";
 import { Panel, PanelHeader, Stat, StatStrip, Well } from "@/components/kit/panel";
 import { Sparkline } from "@/components/kit/encodings";
 import { useGraphQL } from "@/lib/graphql";
-import { dateTime, duration, primaryMachine, relativeTime } from "@/lib/format";
+import { dateTime, duration, primaryMachine, relativeTime, shortDate } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const BenchmarkQuery = graphql(`
@@ -28,7 +28,7 @@ const BenchmarkQuery = graphql(`
         lastRecordedAt
         measurements(limit: 300) {
           id label median mean q1 q3 min max n dirty status commitSha recordedAt build
-          commit { subject }
+          commit { subject committedAt authoredAt }
           run { id title machine { id hostname cpu } }
           profiles { id }
         }
@@ -61,9 +61,16 @@ export function BenchmarkPage() {
   const includeDirty = params.get("dirty") === "1";
   const cohort = all.filter((m) => m.run.machine.id === machineId && m.status !== "FAILED" && (includeDirty || !m.dirty));
   const builds = new Set(cohort.map((m) => m.build ?? "unrecorded"));
-  const points = cohort.map((m, index) => ({
-    position: index, label: `${m.commitSha?.slice(0, 7) ?? "?"}${m.dirty ? "*" : ""}`,
-    subject: `${m.commit?.subject ?? ""} — ${dateTime(m.recordedAt)} on ${m.run.machine.hostname}`,
+  // One point per commit in commit order (re-measurements of a commit collapse onto its latest run),
+  // so re-running an old commit later does not look like a regression in recording order.
+  const byCommit = new Map<string, (typeof cohort)[number][]>();
+  for (const m of cohort) byCommit.set(`${m.commitSha ?? m.id}${m.dirty ? "*" : ""}`, [...byCommit.get(`${m.commitSha ?? m.id}${m.dirty ? "*" : ""}`) ?? [], m]);
+  const commitTime = (m: (typeof cohort)[number]) => m.commit?.committedAt ?? m.commit?.authoredAt ?? m.recordedAt;
+  const ordered = [...byCommit.entries()].map(([key, list]) => ({ key, latest: list.at(-1)!, count: list.length }))
+    .sort((a, b) => commitTime(a.latest).localeCompare(commitTime(b.latest)));
+  const points = ordered.map(({ key, latest: m, count }, index) => ({
+    position: index, label: key.slice(0, 7) + (m.dirty ? "*" : ""),
+    subject: `${m.commit?.subject ?? ""} — ${count > 1 ? `latest of ${count} runs, ` : ""}${shortDate(m.recordedAt)} on ${m.run.machine.hostname}`,
     value: m.median, q1: m.q1, q3: m.q3, min: m.min, max: m.max, n: m.n, dirty: m.dirty ?? false,
   }));
   const medians = cohort.map((m) => m.median);
@@ -116,7 +123,7 @@ export function BenchmarkPage() {
           </StatStrip>
         </Panel>
         <Panel>
-          <PanelHeader icon={History} title="History" subtitle="Median per measurement in recording order for one machine · failed runs excluded · labels are commits (* dirty)"
+          <PanelHeader icon={History} title="History" subtitle="Median per commit in commit order on one machine · re-measured commits show their latest run · failed runs excluded · * dirty"
             actions={<>
               <div className="flex items-center gap-2">
                 <Switch id="history-dirty" checked={includeDirty} onCheckedChange={(checked) => set("dirty", checked ? "1" : null)} />
@@ -133,9 +140,9 @@ export function BenchmarkPage() {
             <Well className="px-1 pt-3 pb-1"><TrendChart points={points} reference={null} statistic="Median" /></Well>
             <Well className="divide-y overflow-hidden">
               {[...all].reverse().slice(0, 60).map((m) => (
-                <Link key={m.id} to={`/runs/${m.run.id}`} className={cn("hover:bg-accent/50 grid grid-cols-[9rem_5rem_minmax(0,1fr)_6rem_3rem_7rem] items-center gap-3 px-3 py-1.5 text-xs",
+                <Link key={m.id} to={`/runs/${m.run.id}`} className={cn("hover:bg-accent/50 grid grid-cols-[6.5rem_5rem_minmax(0,1fr)_6rem_3rem_7rem] items-center gap-3 px-3 py-1.5 text-xs",
                   !cohort.includes(m) && "opacity-45")} title={!cohort.includes(m) ? "Not in the plotted cohort (other machine, dirty or failed)" : undefined}>
-                  <span className="text-muted-foreground font-mono">{dateTime(m.recordedAt)}</span>
+                  <span className="text-muted-foreground font-mono whitespace-nowrap" title={dateTime(m.recordedAt)}>{shortDate(m.recordedAt)}</span>
                   <span className="font-mono">{m.commitSha?.slice(0, 7)}{m.dirty ? "*" : ""}</span>
                   <span className="text-muted-foreground truncate">{m.commit?.subject ?? m.run.title}</span>
                   <span className="text-right font-mono tabular-nums">{duration(m.median)}{m.status === "FAILED" ? " ✕" : ""}</span>
@@ -150,7 +157,7 @@ export function BenchmarkPage() {
 
       <Panel>
         <PanelHeader icon={ListChecks} title="Runs" subtitle="Runs that measured this benchmark" />
-        <div className="px-2 pb-2"><RunsTable runs={benchmark.runs} /></div>
+        <div className="px-2 pb-2"><RunsTable runs={benchmark.runs} showBenchmarks={false} /></div>
       </Panel>
     </div>
   );

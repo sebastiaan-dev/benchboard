@@ -62,13 +62,14 @@ const RunPairsQuery = graphql(`
   query RunPairs($id: ID!, $statistic: Statistic!) {
     run(id: $id) {
       id
-      pairedComparisons(statistic: $statistic) { ratio low high verdict sameRun candidate { id } baseline { id position } }
+      pairedComparisons(statistic: $statistic) { ratio low high verdict sameRun candidate { id } baseline { id position commitSha } }
     }
   }
 `);
 
 const chartConfig = {
-  value: { label: "Statistic", colors: { light: ["#2563eb"], dark: ["#7ea6f6"] } },
+  before: { label: "First commit", colors: { light: ["#a3a3a3"], dark: ["#6b6b73"] } },
+  after: { label: "Later commits", colors: { light: ["#2563eb"], dark: ["#7ea6f6"] } },
 } satisfies ChartConfig;
 
 export function RunPage() {
@@ -91,12 +92,19 @@ export function RunPage() {
   const paired = new Map(pairs.data?.run?.pairedComparisons.map((c) => [c.candidate.id, c]));
   const pick = (m: { mean: number; median: number }) => statistic === "MEAN" ? m.mean : m.median;
   const { scale, unit } = durationScale(Math.max(...run.measurements.map((m) => m.q3)));
-  const rows = run.measurements.map((m) => ({
-    name: `${m.position}. ${m.caseKey}${m.commitSha ? ` @${m.commitSha.slice(0, 7)}` : ""}`,
-    value: pick(m) * scale,
-    spread: [(pick(m) - m.q1) * scale, (m.q3 - pick(m)) * scale],
-    m,
-  }));
+  // The first commit in the run is the "before" side: its bars are grey, later commits are colored.
+  const firstCommit = run.measurements[0]?.commitSha;
+  const rows = run.measurements.map((m) => {
+    const before = m.commitSha === firstCommit;
+    return {
+      name: `${m.caseKey}${m.commitSha ? ` @${m.commitSha.slice(0, 7)}` : ""}`,
+      [before ? "before" : "after"]: pick(m) * scale,
+      [before ? "beforeSpread" : "afterSpread"]: [(pick(m) - m.q1) * scale, (m.q3 - pick(m)) * scale],
+      m,
+    };
+  });
+  const pairList = pairs.data?.run?.pairedComparisons ?? [];
+  const pairVerdicts = { faster: pairList.filter((c) => c.verdict === "IMPROVEMENT").length, slower: pairList.filter((c) => c.verdict === "REGRESSION").length };
   const failed = run.measurements.filter((m) => m.status === "FAILED").length;
   const samples = run.measurements.reduce((sum, m) => sum + m.n, 0);
   const profiles = run.measurements.reduce((sum, m) => sum + m.profiles.length, 0);
@@ -125,12 +133,13 @@ export function RunPage() {
       </div>
 
       <Panel>
-        <StatStrip className="sm:grid-cols-2 xl:grid-cols-5">
+        <StatStrip className={cn("sm:grid-cols-2", profiles > 0 ? "xl:grid-cols-5" : "xl:grid-cols-4")}>
           <Stat label="Cases" value={run.measurements.length} detail={`${new Set(run.measurements.map((m) => m.commitSha)).size} commits`} />
           <Stat label="Samples" value={samples.toLocaleString()} detail={`warmup ${run.warmup ?? "—"}`} />
-          <Stat label="Fastest" value={duration(Math.min(...run.measurements.map(pick)))} detail={statistic.toLowerCase()} />
+          <Stat label="Paired comparisons" value={pairList.length}
+            detail={pairList.length ? `${pairVerdicts.faster} faster · ${pairVerdicts.slower} slower · ${pairList.length - pairVerdicts.faster - pairVerdicts.slower} other` : "no repeated cases"} />
           <Stat label="Machine" value={<span className="truncate text-base">{run.machine.hostname}</span>} detail={run.machine.cpu} />
-          <Stat label="Profiles" value={profiles} detail={profiles ? "attached to cases" : "none attached"} />
+          {profiles > 0 && <Stat label="Profiles" value={profiles} detail="attached to cases" />}
         </StatStrip>
       </Panel>
 
@@ -140,7 +149,7 @@ export function RunPage() {
           <div className="px-4 pb-4">
             <Well className="p-2" >
               <div style={{ height: Math.max(180, rows.length * 30 + 48) }}>
-                <EvilBarChart className="h-full w-full" data={rows} config={chartConfig} layout="horizontal" barRadius={4} animationType="none"
+                <EvilBarChart className="h-full w-full" data={rows} config={chartConfig} layout="horizontal" stackType="stacked" barRadius={4} animationType="none"
                   chartProps={{ margin: { left: 8, right: 24 } }}>
                   <EvilBarChart.Grid horizontal={false} vertical />
                   <EvilBarChart.XAxis type="number" tickFormatter={(value: number) => `${+value.toPrecision(3)} ${unit}`} />
@@ -155,8 +164,10 @@ export function RunPage() {
                       </div>
                     );
                   }} />
-                  <EvilBarChart.Bar dataKey="value"
-                    barProps={{ children: <ErrorBar dataKey="spread" direction="x" width={6} strokeWidth={1.5} stroke="var(--foreground)" opacity={0.5} /> }} />
+                  <EvilBarChart.Bar dataKey="before"
+                    barProps={{ children: <ErrorBar dataKey="beforeSpread" direction="x" width={6} strokeWidth={1.5} stroke="var(--foreground)" opacity={0.5} /> }} />
+                  <EvilBarChart.Bar dataKey="after"
+                    barProps={{ children: <ErrorBar dataKey="afterSpread" direction="x" width={6} strokeWidth={1.5} stroke="var(--foreground)" opacity={0.5} /> }} />
                 </EvilBarChart>
               </div>
             </Well>
@@ -212,7 +223,7 @@ export function RunPage() {
                 <span className="text-right">
                   <button type="button" onClick={() => setBaseline(m.id)} className={cn("hover:bg-accent inline-flex items-center gap-2 rounded px-1.5 py-0.5 text-xs whitespace-nowrap", isBaseline && !pair && "bg-accent")}>
                     {isBaseline && !pair ? "baseline" : comparison ? <>
-                      {pair && <span className="text-muted-foreground font-mono">vs {pair.baseline.position}.</span>}
+                      {pair && <span className="text-muted-foreground font-mono">vs {pair.baseline.commitSha?.slice(0, 7) ?? `case ${pair.baseline.position}`}</span>}
                       <span className="font-mono tabular-nums" title={`95% CI ${percentFromRatio(comparison.low, 2)} … ${percentFromRatio(comparison.high, 2)}`}>{percentFromRatio(comparison.ratio, 2)}</span>
                       <VerdictBadge verdict={comparison.verdict} />
                     </> : <span className="text-muted-foreground">set baseline</span>}
