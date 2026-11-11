@@ -48,7 +48,13 @@ function TrendTooltip({ active, payload, statistic }: { active?: boolean; payloa
 }
 
 /** Absolute timings per commit: statistic line over an interquartile band and a faint min–max envelope. */
-export function TrendChart({ points, reference, statistic }: { points: TrendPoint[]; reference: number | null; statistic: string }) {
+export function TrendChart({ points, reference, statistic, highlight, steps = [] }: {
+  points: TrendPoint[]; reference: number | null; statistic: string;
+  /** Label of the commit under inspection (vertical marker). */
+  highlight?: string;
+  /** Commits with confident step changes (thin red/green markers). */
+  steps?: { label: string; regression: boolean }[];
+}) {
   const { scale, unit } = durationScale(Math.max(...points.map((point) => point.max ?? 0)));
   const s = (value: number | null) => value === null ? null : value * scale;
   const data: TrendRow[] = points.map((point) => ({
@@ -59,13 +65,17 @@ export function TrendChart({ points, reference, statistic }: { points: TrendPoin
     point,
   }));
   return (
-    <EvilComposedChart className="aspect-auto h-64 w-full" data={data} config={trendConfig} curveType="monotone" animationType="none"
+    <EvilComposedChart className="aspect-auto h-64 w-full" data={data} config={trendConfig} curveType="linear" animationType="none"
       chartProps={{ margin: { left: 4, right: 12, top: 8, bottom: 0 } }}>
       <EvilComposedChart.Grid />
       <EvilComposedChart.XAxis dataKey="label" tick={{ fontFamily: "var(--font-mono, monospace)", fontSize: 11 }} />
       <EvilComposedChart.YAxis domain={["auto", "auto"]} tickFormatter={(value: number) => `${+value.toPrecision(3)} ${unit}`} />
-      <Area dataKey="range" type="monotone" connectNulls stroke="none" fill="var(--color-value-0)" fillOpacity={0.07} isAnimationActive={false} activeDot={false} tooltipType="none" />
-      <Area dataKey="iqr" type="monotone" connectNulls stroke="none" fill="var(--color-value-0)" fillOpacity={0.2} isAnimationActive={false} activeDot={false} tooltipType="none" />
+      {steps.map((step) => (
+        <ReferenceLine key={`step-${step.label}`} x={step.label} stroke={step.regression ? "var(--bad)" : "var(--good)"} strokeOpacity={0.55} />
+      ))}
+      {highlight && <ReferenceLine x={highlight} stroke="var(--foreground)" strokeWidth={1.5} strokeDasharray="2 3" />}
+      <Area dataKey="range" type="linear" connectNulls stroke="none" fill="var(--color-value-0)" fillOpacity={0.07} isAnimationActive={false} activeDot={false} tooltipType="none" />
+      <Area dataKey="iqr" type="linear" connectNulls stroke="none" fill="var(--color-value-0)" fillOpacity={0.2} isAnimationActive={false} activeDot={false} tooltipType="none" />
       {reference !== null && (
         <ReferenceLine y={reference * scale} stroke="var(--muted-foreground)" strokeDasharray="4 4"
           label={{ value: "reference", position: "insideTopLeft", fill: "var(--muted-foreground)", fontSize: 10 }} />
@@ -154,7 +164,7 @@ export function DistributionChart({ base, head, bins = 24 }: { base: number[]; h
       chartProps={{ margin: { left: 0, right: 8, top: 14, bottom: 0 } }}>
       <EvilComposedChart.Grid />
       <EvilComposedChart.XAxis dataKey="bin" tick={{ fontSize: 10, fontFamily: "var(--font-mono)" }} interval="preserveStartEnd" unit={` ${unit}`} />
-      <EvilComposedChart.YAxis tickFormatter={(value: number) => `${Math.round(value)}%`} width={36} />
+      <EvilComposedChart.YAxis tickFormatter={(value: number) => `${Math.round(value)}%`} width={44} />
       {mb && <ReferenceLine x={mb} stroke="var(--muted-foreground)" strokeDasharray="3 3" label={{ value: "ref p50", position: "top", fill: "var(--muted-foreground)", fontSize: 10 }} />}
       {mh && <ReferenceLine x={mh} stroke="var(--color-head-0)" strokeDasharray="3 3" label={{ value: "head p50", position: "top", fill: "var(--color-head-0)", fontSize: 10 }} />}
       <EvilComposedChart.Bar dataKey="base" />

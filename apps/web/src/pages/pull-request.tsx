@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router";
-import { ChevronDown, ChevronUp, ExternalLink, Flame, GitBranch, GitCommitHorizontal, GitPullRequest, Layers, RefreshCw, Search } from "lucide-react";
+import { ArrowLeftRight, ChevronDown, ChevronUp, ExternalLink, Flame, GitBranch, GitCommitHorizontal, GitPullRequest, Layers, RefreshCw, Search } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,59 +32,82 @@ const ROW_GRID = "grid-cols-[minmax(7rem,1fr)_auto_4rem_1rem] @md:grid-cols-[min
 
 const value = (statistic: Statistic, m: { mean: number; median: number }) => statistic === "MEAN" ? m.mean : m.median;
 
-export function seriesTicks(series: Series, columns: { position: number; label: string; subject: string }[]): Tick[] {
+/** One tick per commit, colored by that commit's own step (vs the previous measured commit); the sparkline carries the cumulative trend. */
+export function seriesTicks(series: Series, columns: { position: number; label: string; subject: string }[], selected: number | null = null): Tick[] {
   return series.points.map((point, index) => {
     const isReference = series.reference?.position === point.position;
-    const verdict = point.vsReference?.verdict;
+    const step = point.vsPrevious?.verdict;
+    const changed = step === "REGRESSION" || step === "IMPROVEMENT";
+    const color = !point.measurement ? "color-mix(in oklch, var(--muted-foreground) 12%, transparent)"
+      : isReference ? "color-mix(in oklch, var(--foreground) 55%, transparent)"
+        : changed && !point.spansGap ? verdictVar[step]
+          // Steps across unmeasured commits are not attributable to this commit: a muted tint only.
+          : changed ? `color-mix(in oklch, ${verdictVar[step]} 40%, transparent)`
+            : "color-mix(in oklch, var(--muted-foreground) 30%, transparent)";
     return {
       key: point.position,
-      color: !point.measurement ? verdictVar.NONE : isReference ? "color-mix(in oklch, var(--foreground) 45%, transparent)" : verdict ? verdictVar[verdict] : verdictVar.NONE,
-      // A step is attributed to this commit only when the previous commit was measured too.
-      emphasis: !point.spansGap && (point.vsPrevious?.verdict === "REGRESSION" || point.vsPrevious?.verdict === "IMPROVEMENT"),
+      color,
+      selected: selected === point.position,
       label: (
         <div className="grid gap-0.5">
           <span className="font-mono">{columns[index].label}{point.measurement?.dirty ? " +dirty" : ""}</span>
           <span className="opacity-70">{columns[index].subject}</span>
-          <span>{!point.measurement ? "not measured" : isReference ? "reference" : point.vsReference
-            ? `${percentFromRatio(point.vsReference.ratio, 1)} vs reference · ${verdictLabel[point.vsReference.verdict].toLowerCase()}` : "measured"}</span>
-          {point.vsPrevious && <span className="opacity-70">step {percentFromRatio(point.vsPrevious.ratio, 1)} since #{point.previousPosition}{point.spansGap ? " (spans unmeasured commits)" : ""}</span>}
+          {!point.measurement ? <span>not measured</span> : isReference ? <span>reference</span> : point.vsPrevious ? (
+            <span>step {percentFromRatio(point.vsPrevious.ratio, 1)} vs {point.previousPosition === 0 ? "base" : `#${point.previousPosition}`} · {verdictLabel[point.vsPrevious.verdict].toLowerCase()}{point.spansGap ? " (spans unmeasured commits)" : ""}</span>
+          ) : null}
+          {point.vsReference && <span className="text-muted-foreground">{percentFromRatio(point.vsReference.ratio, 1)} vs reference</span>}
         </div>
       ),
     };
   });
 }
 
-function SeriesRow({ series, columns, statistic, threshold, extent, selected, onSelect }: {
+/** The comparison a row shows: head vs reference, or the selected commit's own step. */
+function rowComparison(series: Series, focus: number | null) {
+  if (focus === null) return series.headComparison;
+  return series.points.find((point) => point.position === focus)?.vsPrevious ?? null;
+}
+
+function SeriesRow({ series, columns, statistic, threshold, extent, selected, onSelect, focus }: {
   series: Series; columns: { position: number; label: string; subject: string }[]; statistic: Statistic; threshold: number;
-  extent: number; selected: boolean; onSelect: () => void;
+  extent: number; selected: boolean; onSelect: () => void; focus: number | null;
 }) {
-  const comparison = series.headComparison;
+  const ref = useRef<HTMLButtonElement>(null);
+  // Keyboard navigation keeps the selected row visible.
+  useEffect(() => { if (selected) ref.current?.scrollIntoView({ block: "nearest" }); }, [selected]);
+  const comparison = rowComparison(series, focus);
   const values = series.points.map((point) => point.measurement ? value(statistic, point.measurement) : null);
   const reference = series.points.find((point) => point.position === series.reference?.position)?.measurement;
   const profiled = series.points.some((point) => point.measurement?.profiles.length);
-  const color = comparison ? verdictVar[comparison.verdict] : "var(--muted-foreground)";
+  const trend = series.headComparison ? verdictVar[series.headComparison.verdict] : "var(--muted-foreground)";
+  const empty = focus !== null ? "not measured here" : series.head ? "single commit" : "head not measured";
   return (
     <button
+      ref={ref}
       type="button"
       onClick={onSelect}
       data-selected={selected}
       aria-current={selected ? "true" : undefined}
-      className={cn("group grid w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors", ROW_GRID,
+      className={cn("group grid w-full items-center gap-3 rounded-lg px-3 py-2 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-ring/70", ROW_GRID,
         selected ? "bg-accent" : "hover:bg-accent/50")}
     >
       <span className="min-w-0">
         <span className="text-muted-foreground block truncate font-mono text-[11px]">{series.benchmark.key}</span>
         <span className="block truncate text-sm font-medium">{series.caseKey === "default" ? series.benchmark.title ?? series.label : series.caseKey}</span>
       </span>
-      <Ticks ticks={seriesTicks(series, columns)} size="sm" />
-      <span className="hidden @xl:block"><Sparkline values={values} reference={reference ? value(statistic, reference) : undefined} color={color} width={80} height={22} /></span>
+      <Ticks ticks={seriesTicks(series, columns, focus)} size="sm" />
+      <span className="hidden @xl:block"><Sparkline values={values} reference={reference ? value(statistic, reference) : undefined} color={trend} width={80} height={22} /></span>
       <span className="hidden @md:block">
-        {comparison ? <IntervalGlyph ratio={comparison.ratio} low={comparison.low} high={comparison.high} verdict={comparison.verdict} threshold={threshold} extent={extent} width={96} />
-          : <span className="text-muted-foreground font-mono text-[11px]">{series.head ? "single commit" : "head not measured"}</span>}
+        {comparison ? <IntervalGlyph ratio={comparison.ratio} low={comparison.low} high={comparison.high} verdict={comparison.verdict} threshold={threshold} extent={extent} width={112} />
+          : <span className="text-muted-foreground font-mono text-[11px]">{empty}</span>}
       </span>
-      <span className="text-right font-mono text-sm font-medium tabular-nums" style={{ color: comparison ? verdictText(comparison.verdict) : undefined }}>
+      <span className="flex items-center justify-end gap-1 text-right font-mono text-sm font-medium tabular-nums" style={{ color: comparison ? verdictText(comparison.verdict) : undefined }}>
+        {comparison && !comparison.sameRun && (
+          <span title="Sides come from separate Hyperfine invocations; repeat in reverse order before relying on it."
+            className="text-muted-foreground"><ArrowLeftRight className="size-3" /></span>
+        )}
         {comparison ? percentFromRatio(comparison.ratio, 1)
-          : series.latestComparison ? <span className="text-muted-foreground text-xs font-normal" title={`latest measured #${series.latest?.position}, not the head`}>({percentFromRatio(series.latestComparison.ratio, 0)})</span> : "—"}
+          : focus === null && series.latestComparison ? <span className="text-muted-foreground text-xs font-normal" title={`latest measured #${series.latest?.position}, not the head`}>({percentFromRatio(series.latestComparison.ratio, 0)})</span> : "—"}
       </span>
       {profiled ? <Flame className="size-3.5 text-orange-500" /> : <span />}
     </button>
@@ -170,10 +193,14 @@ export function PullRequestPage() {
   // Headline figures use only series measured at the head with an interval-backed comparison.
   const compared = report.series.filter((series) => series.headComparison && series.headComparison.low !== null);
   const geomean = compared.length ? Math.exp(compared.reduce((sum, series) => sum + Math.log(series.headComparison!.ratio), 0) / compared.length) : null;
-  const extent = Math.max(0.05, ...report.series.flatMap((series) => {
-    const c = series.headComparison;
-    return c ? [Math.abs((c.low ?? c.ratio) - 1), Math.abs((c.high ?? c.ratio) - 1)] : [];
-  }));
+  const focusPosition = commitFilter !== null ? Number(commitFilter) : null;
+  // One axis for the list, clamped so a single large change does not shrink every interval to a dot.
+  const shown = report.series.flatMap((series) => {
+    const c = rowComparison(series, focusPosition);
+    return c ? [Math.abs(c.ratio - 1)] : [];
+  }).sort((a, b) => a - b);
+  const p75 = shown.length ? shown[Math.min(shown.length - 1, Math.floor(shown.length * 0.75))] : 0;
+  const extent = Math.max(3 * threshold, p75 * 1.25, 0.03);
   const measuredCommits = report.commits.filter((commit) => report.series.some((series) => series.points.find((point) => point.position === commit.position)?.measurement));
   const profiles = report.series.reduce((sum, series) => sum + series.points.reduce((n, point) => n + (point.measurement?.profiles.length ?? 0), 0), 0);
   const steps = columns.map((column) => {
@@ -364,10 +391,11 @@ export function PullRequestPage() {
               <div className="@container px-2 pb-2" data-series-list role="group" aria-label="Series">
                 <div className={cn("text-muted-foreground grid gap-3 px-3 pb-1.5 font-mono text-[10px] tracking-wide whitespace-nowrap uppercase", ROW_GRID)}>
                   <span>Series</span><span style={{ width: columns.length * 9 - 3 }}>Commits</span><span className="hidden @xl:block">Trend</span>
-                  <span className="hidden @md:block">Head · 95% CI</span><span className="text-right">Δ head</span><span />
+                  <span className="hidden @md:block">{focusPosition !== null ? "Step · 95% CI" : "Head · 95% CI"}</span>
+                  <span className="text-right">{focusPosition !== null ? `Δ at #${focusPosition}` : "Δ head"}</span><span />
                 </div>
                 {visible.map((series) => (
-                  <SeriesRow key={series.id} series={series} columns={columns} statistic={statistic} threshold={threshold} extent={extent}
+                  <SeriesRow key={series.id} series={series} columns={columns} statistic={statistic} threshold={threshold} extent={extent} focus={focusPosition}
                     selected={series.id === selectedId} onSelect={() => update({ series: series.id })} />
                 ))}
                 {!visible.length && <p className="text-muted-foreground px-3 py-8 text-center text-sm">No series match.</p>}

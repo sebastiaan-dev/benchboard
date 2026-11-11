@@ -46,8 +46,8 @@ const PaletteQuery = graphql(`
   query Palette($repository: ID!, $search: String) {
     repository(id: $repository) {
       id
-      benchmarks { id key title }
-      runs(limit: 25, search: $search) { id title recordedAt measurements { commitSha } }
+      benchmarks { id key title cases { caseKey count } }
+      runs(limit: 25, search: $search) { id title recordedAt machine { hostname } measurements { commitSha benchmark { key } } }
       runCount(search: $search)
       profiles(limit: 25, search: $search) { id label measurement { caseKey commitSha benchmark { key } } }
     }
@@ -136,40 +136,51 @@ function Palette({ open, onOpenChange, repositoryId }: { open: boolean; onOpenCh
             ))}
           </CommandGroup>
         )}
-        <CommandGroup heading="Pull requests">
+        {shell.data?.repositories.some((repo) => repo.pullRequests.length) && <CommandGroup heading="Pull requests">
           {shell.data?.repositories.flatMap((repo) => repo.pullRequests.map((pr) => (
             <CommandItem key={pr.id} value={`pr ${pr.title} ${pr.number ?? pr.headRef} ${repo.name}`} onSelect={() => go(`/pr/${pr.id}`)}>
               {pr.source === "GITHUB" ? <GitPullRequest /> : <GitBranch />}
               <span className="truncate">{pr.title}</span>
-              <span className="text-muted-foreground ml-auto font-mono text-xs">{pr.number ? `#${pr.number}` : pr.headRef}</span>
+              <span className="text-muted-foreground ml-auto shrink-0 font-mono text-xs">{pr.number ? `#${pr.number}` : pr.headRef}</span>
             </CommandItem>
           )))}
-        </CommandGroup>
+        </CommandGroup>}
         {palette.data?.repository && <>
-          <CommandGroup heading="Benchmarks">
-            {palette.data.repository.benchmarks.map((benchmark) => (
-              <CommandItem key={benchmark.id} value={`benchmark ${benchmark.key} ${benchmark.title ?? ""}`} onSelect={() => go(`/benchmarks/${benchmark.id}`)}>
-                <Layers /> <span className="font-mono text-xs">{benchmark.key}</span>
-                <span className="text-muted-foreground truncate text-xs">{benchmark.title}</span>
+          <CommandGroup heading="Series">
+            {palette.data.repository.benchmarks.flatMap((benchmark) => benchmark.cases.map((entry) => (
+              <CommandItem key={`${benchmark.id}:${entry.caseKey}`} value={`series ${benchmark.key} ${entry.caseKey} ${benchmark.title ?? ""}`}
+                onSelect={() => go(`/benchmarks/${benchmark.id}?case=${encodeURIComponent(entry.caseKey)}`)}>
+                <Layers />
+                <span className="truncate"><span className="text-muted-foreground font-mono text-xs">{benchmark.key} · </span>{entry.caseKey === "default" ? benchmark.title ?? benchmark.key : entry.caseKey}</span>
+                <span className="text-muted-foreground ml-auto shrink-0 font-mono text-xs">{entry.count} runs</span>
               </CommandItem>
-            ))}
+            )))}
           </CommandGroup>
-          <CommandGroup heading={search ? "Profiles (matching)" : "Recent profiles"}>
+          <CommandGroup heading={search ? "Profiles · matching" : "Recent profiles"}>
             {palette.data.repository.profiles.map((profile) => (
               <CommandItem key={profile.id} value={serverValue(`profile ${profile.id} ${profile.measurement.benchmark.key} ${profile.measurement.caseKey} ${profile.label ?? ""}`)}
                 onSelect={() => go(`/profiles/${profile.id}`)}>
                 <Flame /> <span className="truncate">{seriesName(profile.measurement.benchmark.key, profile.measurement.caseKey)}</span>
-                <span className="text-muted-foreground ml-auto font-mono text-xs">{profile.measurement.commitSha?.slice(0, 7)}</span>
+                <span className="text-muted-foreground ml-auto shrink-0 font-mono text-xs">{profile.measurement.commitSha?.slice(0, 7)}</span>
               </CommandItem>
             ))}
           </CommandGroup>
-          <CommandGroup heading={search ? `Runs (${palette.data.repository.runCount} match${palette.data.repository.runCount > 25 ? ", first 25" : ""})` : "Recent runs"}>
-            {palette.data.repository.runs.map((run) => (
-              <CommandItem key={run.id} value={serverValue(`run ${run.title ?? ""} ${run.id} ${run.measurements.map((m) => m.commitSha ?? "").join(" ")}`)} onSelect={() => go(`/runs/${run.id}`)}>
-                <ListChecks /> <span className="truncate">{run.title ?? run.id}</span>
-                <span className="text-muted-foreground ml-auto text-xs">{relativeTime(run.recordedAt)}</span>
-              </CommandItem>
-            ))}
+          <CommandGroup heading={search ? `Runs · ${palette.data.repository.runCount} matching${palette.data.repository.runCount > 25 ? " (first 25)" : ""}` : "Recent runs"}>
+            {palette.data.repository.runs.map((run) => {
+              const shas = [...new Set(run.measurements.map((m) => m.commitSha?.slice(0, 7)).filter(Boolean))];
+              return (
+                <CommandItem key={run.id} value={serverValue(`run ${run.title ?? ""} ${run.id} ${run.measurements.map((m) => `${m.commitSha ?? ""} ${m.benchmark.key}`).join(" ")}`)} onSelect={() => go(`/runs/${run.id}`)}>
+                  <ListChecks />
+                  <span className="grid min-w-0">
+                    <span className="truncate">{run.title ?? run.id}</span>
+                    <span className="text-muted-foreground truncate font-mono text-[11px]">
+                      {run.measurements[0]?.benchmark.key} · {shas.slice(0, 2).join(", ")}{shas.length > 2 ? ` +${shas.length - 2}` : ""} · {run.machine.hostname}
+                    </span>
+                  </span>
+                  <span className="text-muted-foreground ml-auto shrink-0 text-xs">{relativeTime(run.recordedAt)}</span>
+                </CommandItem>
+              );
+            })}
           </CommandGroup>
         </>}
       </CommandList>
@@ -203,8 +214,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const base = repository ? `/repositories/${repository.id}` : "/";
-  const nav = [
+  // Without a repository the sections have nothing to show; they are listed but disabled.
+  const base = repository ? `/repositories/${repository.id}` : null;
+  const nav: { label: string; icon: typeof Flame; to: string; exact?: boolean; count?: number }[] = !base ? [{ label: "Overview", icon: LayoutDashboard, to: "/", exact: true }] : [
     { label: "Overview", icon: LayoutDashboard, to: base, exact: true },
     { label: "Pull requests", icon: GitPullRequest, to: `${base}/pulls`, count: repository?.pullRequests.length },
     { label: "Benchmarks", icon: Layers, to: `${base}/benchmarks`, count: repository?.benchmarks.length },

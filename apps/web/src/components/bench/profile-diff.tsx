@@ -57,7 +57,9 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
   const diff = useMemo(() => baseThreads.view && headThreads.view ? diffTrees(baseThreads.view, headThreads.view, { metric, iterations }) : undefined,
     [baseThreads.view, headThreads.view, iterations.base, iterations.head, metric]);
   const root = useMemo(() => diff ? fromDiffTree(diff, side) : undefined, [diff, side]);
-  const functions = useMemo(() => baseThreads.view && headThreads.view ? diffFunctions(baseThreads.view, headThreads.view, { metric, iterations }).slice(0, 1000) : [],
+  // Functions whose time did not change are noise in a change table.
+  const functions = useMemo(() => baseThreads.view && headThreads.view
+    ? diffFunctions(baseThreads.view, headThreads.view, { metric, iterations }).filter((entry) => Math.abs(entry.headSelfMs - entry.baseSelfMs) >= 0.01).slice(0, 1000) : [],
     [baseThreads.view, headThreads.view, iterations.base, iterations.head, metric]);
 
   if (query.isPending) return <Skeleton className="h-96 rounded-2xl" />;
@@ -105,7 +107,7 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
             <div className="text-muted-foreground flex items-center gap-1.5 font-mono text-[10.5px] uppercase">
               less
               <span className="flex h-2 w-20 overflow-hidden rounded-full">
-                {[-1, -0.6, -0.3, 0, 0.3, 0.6, 1].map((value) => <span key={value} className="flex-1" style={{ background: diffColor(1, 1 + value) }} />)}
+                {[-0.1, -0.06, -0.03, 0, 0.03, 0.06, 0.1].map((value) => <span key={value} className="flex-1" style={{ background: diffColor(1, 1 + value, 1) }} />)}
               </span>
               more
             </div>
@@ -114,23 +116,23 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
         </div>
         <FlameGraph root={root} diff search={search} />
         <Well className="overflow-hidden">
-          <div className="text-muted-foreground grid grid-cols-[6.5rem_1fr_5.5rem_5.5rem] gap-3 border-b px-3 py-2 font-mono text-[10.5px] tracking-wide uppercase">
-            <span className="text-right">Δ self</span><span>Function</span><span className="text-right">Base</span><span className="text-right">Head</span>
+          <div className="text-muted-foreground grid grid-cols-[6rem_8rem_minmax(0,1fr)_5rem_5rem] gap-3 border-b px-3 py-2 text-xs">
+            <span className="text-right">Δ self</span><span className="text-center">less · more</span><span>Function</span><span className="text-right">Base</span><span className="text-right">Head</span>
           </div>
           {functions.slice(0, rows).map((entry) => {
             const delta = entry.headSelfMs - entry.baseSelfMs;
             const width = `${(Math.abs(delta) / maxDelta) * 50}%`;
             return (
               <button type="button" key={`${entry.name}\0${entry.library}`} onClick={() => setSearch(entry.name)}
-                className="hover:bg-accent/50 grid w-full grid-cols-[6.5rem_1fr_5.5rem_5.5rem] items-center gap-3 border-b px-3 py-1.5 text-left last:border-b-0">
+                className="hover:bg-accent/50 grid w-full grid-cols-[6rem_8rem_minmax(0,1fr)_5rem_5rem] items-center gap-3 border-b px-3 py-1.5 text-left last:border-b-0">
                 <span className="text-right"><Delta value={delta} /></span>
-                <span className="relative min-w-0">
-                  {/* Diverging bar centred on the column: right for more time, left for less. */}
-                  <span className="absolute inset-y-0 left-1/2 w-px bg-border" />
-                  <span className="absolute inset-y-0.5 rounded-sm opacity-30"
-                    style={{ background: delta > 0 ? "var(--bad)" : "var(--info)", width, ...(delta > 0 ? { left: "50%" } : { right: "50%" }) }} />
-                  <span className="relative block truncate font-mono text-xs" title={`${entry.name}${entry.library ? ` · ${entry.library}` : ""}`}>{entry.name}</span>
+                {/* Diverging bar in its own column: right for more time, left for less. */}
+                <span className="relative h-2.5">
+                  <span className="bg-border absolute inset-y-0 left-1/2 w-px" />
+                  <span className="absolute inset-y-0 rounded-full"
+                    style={{ background: delta > 0 ? "var(--bad)" : "var(--info)", opacity: 0.7, width, ...(delta > 0 ? { left: "50%" } : { right: "50%" }) }} />
                 </span>
+                <span className="block min-w-0 truncate font-mono text-xs" title={`${entry.name}${entry.library ? ` · ${entry.library}` : ""}`}>{entry.name}</span>
                 <span className="text-muted-foreground text-right font-mono text-xs tabular-nums">{ms(entry.baseSelfMs)}</span>
                 <span className="text-right font-mono text-xs tabular-nums">{ms(entry.headSelfMs)}</span>
               </button>

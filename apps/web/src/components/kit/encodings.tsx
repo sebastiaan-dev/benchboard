@@ -60,21 +60,21 @@ export interface Tick {
   key: string | number;
   color: string;
   label?: ReactNode;
-  emphasis?: boolean;
+  /** Draws a ring, e.g. for the selected commit. */
+  selected?: boolean;
   outline?: boolean;
 }
 
 /** Uptime-style row of pills (one per commit), colored by state. */
 export function Ticks({ ticks, className, size = "md" }: { ticks: Tick[]; className?: string; size?: "sm" | "md" }) {
   return (
-    <div className={cn("flex items-end gap-[3px]", className)}>
+    <div className={cn("flex items-center gap-[3px]", className)}>
       {ticks.map((tick) => {
         const pill = (
           <span
-            // Emphasised ticks (e.g. a step change at that commit) are full height; others sit slightly shorter.
-            className={cn("block shrink-0 rounded-[2px]", size === "md" ? "w-2" : "w-1.5",
-              size === "md" ? (tick.emphasis ? "h-5" : "h-4") : (tick.emphasis ? "h-4" : "h-3"))}
-            style={tick.outline ? { boxShadow: `inset 0 0 0 1.5px ${tick.color}` } : { background: tick.color, opacity: tick.emphasis ? 1 : 0.75 }}
+            className={cn("block shrink-0 rounded-[2px]", size === "md" ? "h-5 w-2" : "h-4 w-2",
+              tick.selected && "ring-foreground ring-offset-card ring-[1.5px] ring-offset-1")}
+            style={tick.outline ? { boxShadow: `inset 0 0 0 1.5px ${tick.color}` } : { background: tick.color }}
           />
         );
         return tick.label ? (
@@ -126,9 +126,15 @@ export function IntervalGlyph({ ratio, low, high, verdict, threshold, extent, wi
       <rect x={scale(1 - threshold)} width={scale(1 + threshold) - scale(1 - threshold)} y={2} height={height - 4} rx={2}
         fill="color-mix(in oklch, var(--muted-foreground) 12%, transparent)" />
       <line x1={width / 2} x2={width / 2} y1={0} y2={height} stroke="var(--muted-foreground)" strokeOpacity={0.5} />
-      {low !== null && high !== null && <line x1={clamp(scale(low))} x2={clamp(scale(high))} y1={mid} y2={mid} stroke={color} strokeWidth={2} strokeLinecap="round" />}
+      {low !== null && high !== null && (
+        <rect x={clamp(scale(low)) - 3} width={Math.max(6, clamp(scale(high)) - clamp(scale(low)) + 6)} y={mid - 3} height={6} rx={3}
+          fill={color} fillOpacity={0.35} />
+      )}
+      {/* Values beyond the axis get a chevron at the edge instead of a dot pinned there. */}
+      {(ratio - 1) / extent > 1 && <path d={`M${width - 5},${mid - 4} L${width - 1},${mid} L${width - 5},${mid + 4}`} fill="none" stroke={color} strokeWidth={1.5} />}
+      {(ratio - 1) / extent < -1 && <path d={`M5,${mid - 4} L1,${mid} L5,${mid + 4}`} fill="none" stroke={color} strokeWidth={1.5} />}
       {/* Without an interval only a hollow point is drawn: descriptive, not inferential. */}
-      <circle cx={clamp(scale(ratio))} cy={mid} r={3.5} fill={low === null ? "var(--card)" : color} stroke={low === null ? color : "var(--card)"} strokeWidth={1.5} />
+      {Math.abs(ratio - 1) <= extent && <circle cx={clamp(scale(ratio))} cy={mid} r={3.5} fill={low === null ? "var(--card)" : color} stroke={low === null ? color : "var(--card)"} strokeWidth={1.5} />}
     </svg>
   );
 }

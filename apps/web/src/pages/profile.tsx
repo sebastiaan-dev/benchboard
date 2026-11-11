@@ -39,7 +39,7 @@ export function ProfilePage() {
   const threads = useThreadView(tree);
   useRepositoryScope(profile?.measurement.benchmark.repository.id);
   const root = useMemo(() => threads.view && profile ? fromCallTree(threads.view, metric, profile.iterations) : undefined, [threads.view, profile, metric]);
-  const stats = useMemo(() => threads.view ? functionStats(threads.view, metric).sort((a, b) => b[sort] - a[sort]).slice(0, 1000) : [], [threads.view, sort, metric]);
+  const stats = useMemo(() => threads.view ? functionStats(threads.view, metric).filter((stat) => stat[sort] > 0).sort((a, b) => b[sort] - a[sort]).slice(0, 1000) : [], [threads.view, sort, metric]);
 
   if (query.isPending) return <LoadingState rows={2} />;
   if (query.error) return <ErrorState error={query.error} />;
@@ -119,15 +119,18 @@ export function ProfilePage() {
           actions={<Segmented value={sort} onChange={setSort} options={[{ value: "self", label: "Self" }, { value: "total", label: "Total" }]} />} />
         <div className="px-4 pb-4">
           <Well className="overflow-hidden">
+            <div className="text-muted-foreground grid grid-cols-[5.5rem_5.5rem_6rem_minmax(0,1fr)_8rem] gap-3 border-b px-3 py-2 text-xs">
+              <span className="text-right">Self</span><span className="text-right">Total</span><span>Share</span><span>Function</span><span className="text-right">Library</span>
+            </div>
             {stats.slice(0, rows).map((stat) => (
               <button type="button" key={`${stat.name}\0${stat.library}`} onClick={() => setSearch(stat.name)}
-                className="hover:bg-accent/50 grid w-full grid-cols-[5.5rem_5.5rem_minmax(0,1fr)_8rem] items-center gap-3 border-b px-3 py-1.5 text-left last:border-b-0">
+                className="hover:bg-accent/50 grid w-full grid-cols-[5.5rem_5.5rem_6rem_minmax(0,1fr)_8rem] items-center gap-3 border-b px-3 py-1.5 text-left last:border-b-0">
                 <span className="text-right font-mono text-xs tabular-nums">{ms(stat.self * scale)}</span>
                 <span className="text-muted-foreground text-right font-mono text-xs tabular-nums">{ms(stat.total * scale)}</span>
-                <span className="relative min-w-0">
-                  <span className="absolute inset-y-0.5 left-0 rounded-sm bg-orange-500/20" style={{ width: `${(stat[sort] / maxSelf) * 100}%` }} />
-                  <span className="relative block truncate px-1 font-mono text-xs" title={stat.name}>{stat.name}</span>
+                <span className="bg-muted relative h-1.5 overflow-hidden rounded-full">
+                  <span className="absolute inset-y-0 left-0 rounded-full bg-orange-400" style={{ width: `${(stat[sort] / maxSelf) * 100}%` }} />
                 </span>
+                <span className="block min-w-0 truncate font-mono text-xs" title={stat.name}>{stat.name}</span>
                 <span className="text-muted-foreground truncate text-right font-mono text-[11px]">{stat.library}</span>
               </button>
             ))}

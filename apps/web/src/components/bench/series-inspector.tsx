@@ -204,7 +204,10 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
         <section className="space-y-2">
           <SectionLabel>Per commit · representative measurements</SectionLabel>
           <Well className="px-1 pt-3 pb-1">
-            <TrendChart points={trend} reference={reference?.measurement ? pick(reference.measurement) : null} statistic={statistic === "MEAN" ? "Mean" : "Median"} />
+            <TrendChart points={trend} reference={reference?.measurement ? pick(reference.measurement) : null} statistic={statistic === "MEAN" ? "Mean" : "Median"}
+              highlight={scope.kind === "step" ? columns[report.commits.findIndex((entry) => entry.position === scope.position)] : undefined}
+              steps={series.points.flatMap((point, index) => !point.spansGap && (point.vsPrevious?.verdict === "REGRESSION" || point.vsPrevious?.verdict === "IMPROVEMENT")
+                ? [{ label: columns[index], regression: point.vsPrevious.verdict === "REGRESSION" }] : [])} />
           </Well>
         </section>
 

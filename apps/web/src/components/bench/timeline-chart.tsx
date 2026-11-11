@@ -78,7 +78,7 @@ export function TimelineChart({ commits, series }: { commits: TimelineCommit[]; 
       className="aspect-auto h-80 w-full"
       data={data}
       config={config}
-      curveType="monotone"
+      curveType="linear"
       animationType="left-to-right"
       chartProps={{ margin: { left: 4, right: 16, top: 8, bottom: 0 } }}
     >

@@ -77,15 +77,18 @@ function libraryColor(node: FlameNode): string {
   return `oklch(${light.toFixed(2)} ${system ? 0.06 : 0.11} ${hue})`;
 }
 
-export function diffColor(base: number, head: number): string {
-  const max = Math.max(base, head);
-  if (max <= 0) return "oklch(0.74 0.008 264)";
-  const relative = (head - base) / max;
-  if (Math.abs(relative) < 0.03) return "oklch(0.74 0.008 264)";
-  // Tints stay light enough for dark text; chroma grows with the relative change.
-  const strength = Math.min(1, Math.abs(relative)) ** 0.8;
-  const light = 0.84 - strength * 0.16;
-  return relative > 0 ? `oklch(${light.toFixed(3)} ${(0.05 + strength * 0.13).toFixed(3)} 25)` : `oklch(${light.toFixed(3)} ${(0.04 + strength * 0.1).toFixed(3)} 245)`;
+/**
+ * Differential tint by absolute change relative to the whole profile (`reference`), so a tiny new
+ * frame stays pale and only frames that move a meaningful share of the time are saturated.
+ */
+export function diffColor(base: number, head: number, reference = Math.max(base, head)): string {
+  const neutral = "oklch(0.8 0.006 264)";
+  if (reference <= 0) return neutral;
+  const delta = head - base;
+  const strength = Math.min(1, Math.abs(delta) / (0.1 * reference));
+  if (strength < 0.05) return neutral;
+  const light = 0.9 - strength * 0.12;
+  return delta > 0 ? `oklch(${light.toFixed(3)} ${(0.03 + strength * 0.12).toFixed(3)} 25)` : `oklch(${light.toFixed(3)} ${(0.03 + strength * 0.09).toFixed(3)} 245)`;
 }
 
 const ROW = 22;
@@ -121,8 +124,8 @@ function layout(focus: FlameNode, width: number): { boxes: Layout[]; depth: numb
   return { boxes, depth: maxDepth + 1 };
 }
 
-const Boxes = memo(function Boxes({ boxes, diff, matches, focus }: {
-  boxes: Layout[]; diff: boolean; matches: Set<FlameNode> | null; focus: FlameNode;
+const Boxes = memo(function Boxes({ boxes, diff, matches, focus, reference }: {
+  boxes: Layout[]; diff: boolean; matches: Set<FlameNode> | null; focus: FlameNode; reference: number;
 }) {
   return boxes.map(({ node, x, width, depth }) => {
     const dimmed = matches !== null && !matches.has(node);
@@ -136,7 +139,7 @@ const Boxes = memo(function Boxes({ boxes, diff, matches, focus }: {
         style={{
           // Small gaps between blocks give the rounded, tiled look of the references.
           left: x + 1, top: depth * ROW + 1, width: Math.max(1, width - 2), height: ROW - 2,
-          background: diff && node.base !== undefined ? diffColor(node.base, node.head ?? 0) : libraryColor(node),
+          background: diff && node.base !== undefined ? diffColor(node.base, node.head ?? 0, reference) : libraryColor(node),
           opacity: dimmed ? 0.25 : undefined,
         }}
       >
@@ -263,7 +266,7 @@ export function FlameGraph({ root, diff = false, search = "", className, total =
         }}
       >
         <div className="absolute inset-1 overflow-hidden rounded-lg">
-          <Boxes boxes={boxes} diff={diff} matches={matches} focus={focus} />
+          <Boxes boxes={boxes} diff={diff} matches={matches} focus={focus} reference={Math.max(root.base ?? 0, root.head ?? 0, root.value)} />
           {cursor && (() => {
             const box = boxes.find((entry) => entry.node === cursor);
             return box ? <div className="pointer-events-none absolute rounded-[4px] ring-2 ring-foreground" style={{ left: box.x + 1, top: box.depth * ROW + 1, width: Math.max(2, box.width - 2), height: ROW - 2 }} /> : null;
