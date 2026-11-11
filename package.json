@@ -3,7 +3,10 @@
   "private": true,
   "type": "module",
   "packageManager": "bun@1.4.2",
-  "workspaces": ["packages/*", "apps/*"],
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
   "scripts": {
     "benchboard": "bun packages/cli/bin/benchboard.ts",
     "dev": "bun run --filter '@benchboard/web' --filter '@benchboard/cli' dev",
@@ -11,11 +14,13 @@
     "typecheck": "bun run --filter '*' typecheck",
     "test": "bun test --timeout 60000 packages",
     "check": "bun run typecheck && bun run test && bun run build",
-    "seed:demo": "BENCHBOARD_HOME=${BENCHBOARD_HOME:-/tmp/benchboard-demo} bun scripts/seed-demo.ts"
+    "seed:demo": "BENCHBOARD_HOME=${BENCHBOARD_HOME:-/tmp/benchboard-demo} bun scripts/seed-demo.ts",
+    "test:e2e": "bun run build && bun test --timeout 120000 e2e"
   },
   "devDependencies": {
     "@benchboard/core": "workspace:*",
     "@types/bun": "^1.4.4",
+    "playwright-core": "1.59",
     "typescript": "~7.0.2"
   }
 }

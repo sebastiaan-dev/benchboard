@@ -204,5 +204,7 @@ inferring commits from recorded revision notes.
 ## Checks
 
 ```sh
-bun run check  # typecheck all packages, bun test suites, web build
+bun run check     # typecheck all packages, bun test suites, web build
+bun run test:e2e  # browser smoke test: seeds the demo, serves it, renders every page in both themes
+                  # and exercises commit scoping, mutations, shortcuts and keyboard flame graphs
 ```
