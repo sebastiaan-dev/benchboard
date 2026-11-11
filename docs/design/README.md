@@ -1,7 +1,8 @@
 # Benchboard design direction
 
-References live in [`references/`](references/) (`index.json` lists the source posts; `sheet-*.jpg`
-are contact sheets, `*-f<n>.jpg` frames extracted from videos, which are kept locally only).
+The references are third-party posts on X; [`references/index.json`](references/index.json) lists
+them. Their media (images, contact sheets `sheet-*.jpg`, frames `*-f<n>.jpg` extracted from videos)
+are kept locally only and are not part of the repository.
 
 ## What the references have in common
 

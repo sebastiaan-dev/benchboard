@@ -1,1 +1,4 @@
-*.mp4
+# Reference media are third-party posts: kept locally, not committed. index.json links the sources.
+*
+!.gitignore
+!index.json
