@@ -50,7 +50,9 @@ try {
 		const name = `benchboard-${target.replace(/^bun-/, "")}`;
 		const outfile = path.join(out, name);
 		const build = Bun.spawnSync(["bun", "build", entry, "--compile", `--target=${target}`, "--minify", "--sourcemap",
-			`--define=BENCHBOARD_VERSION=${JSON.stringify(version)}`, `--outfile=${outfile}`], { cwd: root, stdout: "pipe", stderr: "inherit" });
+			`--define=BENCHBOARD_VERSION=${JSON.stringify(version)}`, `--outfile=${outfile}`],
+			// Cross-compiling leaves scratch files in the working directory: keep them in the temporary one.
+			{ cwd: work, stdout: "pipe", stderr: "inherit" });
 		if (build.exitCode !== 0) throw new Error(`bun build failed for ${target}`);
 		const digest = new Bun.CryptoHasher("sha256").update(fs.readFileSync(outfile)).digest("hex");
 		sums.push(`${digest}  ${name}`);
