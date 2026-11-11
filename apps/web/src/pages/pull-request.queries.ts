@@ -61,8 +61,8 @@ export const PullRequestReportQuery = graphql(`
         statistic
         threshold
         includeDirty
-        machine { id hostname cpu os arch }
-        machines { count machine { id hostname cpu } }
+        machine { id hostname cpu os arch platform }
+        machines { count machine { id hostname cpu platform } }
         commits { position isBase commit { sha shortSha subject author authoredAt url } }
         summary { series regressions improvements unchanged inconclusive failed insufficient missingReference missingHead crossRun }
         series {
@@ -105,7 +105,7 @@ export const SeriesSamplesQuery = graphql(`
       commitSha
       times
       exitCodes
-      run { id title recordedAt conditions environment machine { hostname cpu } }
+      run { id title recordedAt conditions environment machine { hostname cpu platform } }
     }
   }
 `);

@@ -314,7 +314,7 @@ export function SeriesInspector({ series, report, statistic, threshold, scope, o
               ["command", candidateDetail.command ?? candidateDetail.exportedCommand],
               ["build", candidateDetail.build],
               ["commit", <>{candidateDetail.commitSha?.slice(0, 12)}{candidateDetail.commitInferred ? <span className="text-muted-foreground"> // inferred</span> : null}</>],
-              ["machine", `${candidateDetail.run.machine.hostname} · ${candidateDetail.run.machine.cpu}`],
+              ["machine", `${candidateDetail.run.machine.hostname} · ${candidateDetail.run.machine.platform ? `${candidateDetail.run.machine.platform} · ` : ""}${candidateDetail.run.machine.cpu}`],
               ["conditions", candidateDetail.run.conditions],
               ["environment", candidateDetail.run.environment],
             ]} />

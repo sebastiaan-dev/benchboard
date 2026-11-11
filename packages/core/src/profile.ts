@@ -26,10 +26,27 @@ export interface ParsedProfile {
 	durationMs: number | null;
 	/** Fraction of non-thread frames, weighted by samples, that resolved to a symbol name. */
 	symbolicatedShare: number;
+	/** The recording OS as samply reports it, e.g. "macOS 15.3" or "Amazon Linux 2023". */
+	platform: string | null;
+	/**
+	 * Whether threads were also sampled while not running (sleeping, blocked, waiting for I/O), so that
+	 * sampled time includes waits. samply does this on macOS; on Linux (perf) and Windows (ETW) it only
+	 * samples running threads, so sampled time is on-CPU time. Null when the recording OS is unknown.
+	 */
+	waitsSampled: boolean | null;
 }
 
 const isObject = (value: unknown): value is Record<string, any> => value !== null && typeof value === "object" && !Array.isArray(value);
 const hexName = /^0x[0-9a-f]+$/i;
+/** samply names functions it found no symbol for `fun_<address>` (e.g. stripped libc on Linux). */
+const placeholderName = /^fun_[0-9a-f]+$/i;
+export const UNKNOWN_FRAME = "[unknown]";
+
+/** samply samples idle threads only on macOS (see ParsedProfile.waitsSampled). */
+export function samplesWaits(platform: string | null): boolean | null {
+	if (!platform) return null;
+	return /^(macOS|Mac OS X|OS X)\b/i.test(platform);
+}
 
 export function decodeProfileBytes(bytes: Uint8Array): unknown {
 	if (bytes.length > MAX_PROFILE_BYTES) throw new Error("Profile exceeds 512 MiB.");
@@ -139,13 +156,18 @@ export function parseProfile(data: unknown, syms?: SymsSidecar | null, maxNodes?
 			const resource = funcTable.resource?.[func] ?? -1;
 			const lib = resource >= 0 ? resourceTable.lib?.[resource] ?? null : null;
 			const libName = lib !== null && lib !== undefined ? libs[lib]?.name ?? null : resource >= 0 ? strings[resourceTable.name?.[resource]] ?? null : null;
-			const name = strings[funcTable.name[func]] ?? "?";
+			const raw = strings[funcTable.name[func]] ?? "?";
+			// Addresses outside every module cannot be symbolicated and are often unique per sample (on arm64
+			// Linux, return addresses still carrying pointer-authentication bits): one "[unknown]" frame keeps
+			// flame graphs and call-path diffs from splitting on them.
+			const name = resource < 0 && hexName.test(raw) ? UNKNOWN_FRAME : raw;
 			const address = frameTable.address?.[frame] ?? -1;
 			let symbols: SymbolFrame[] | null = null;
 			if (hexName.test(name) && symbolicator && lib !== null && lib !== undefined && libSyms[lib] !== undefined && address >= 0) {
 				symbols = symbolicator.lookup(libSyms[lib]!, address);
 			}
-			frameResolved[frame] = symbols !== null || !hexName.test(name);
+			frameResolved[frame] = symbols !== null ? symbols.some((symbol) => !placeholderName.test(symbol.name))
+				: !hexName.test(raw) && !placeholderName.test(raw);
 			funcs = symbols ? symbols.map((symbol) => builder.func(symbol.name, libName)) : [builder.func(name, libName)];
 			frameFuncs[frame] = funcs;
 			return funcs;
@@ -213,6 +235,8 @@ export function parseProfile(data: unknown, syms?: SymsSidecar | null, maxNodes?
 		product: typeof data.meta.product === "string" ? data.meta.product : null,
 		durationMs: Number.isFinite(end - start) ? end - start : null,
 		symbolicatedShare: resolved + unresolved ? resolved / (resolved + unresolved) : 1,
+		platform: typeof data.meta.oscpu === "string" && data.meta.oscpu.trim() ? data.meta.oscpu.trim().slice(0, 200) : null,
+		waitsSampled: samplesWaits(typeof data.meta.oscpu === "string" ? data.meta.oscpu.trim() : null),
 	};
 }
 

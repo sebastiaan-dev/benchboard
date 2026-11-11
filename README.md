@@ -132,6 +132,12 @@ In the web app:
   comparison.
 
 In the terminal: `benchboard profile show <id>` and `benchboard profile diff <base> <head>` (`--metric cpu|sampled`).
+`benchboard profile check` says whether samply can record on this machine.
+
+On Linux (for example EC2 runners), samply records through perf. It needs `kernel.perf_event_paranoid`
+set to 1 or lower, and it only samples running threads, so Linux profiles show on-CPU time but not
+waits. [docs/linux-profiling.md](docs/linux-profiling.md) covers runner setup
+(`deploy/linux-runner-setup.sh`), symbols, machine naming and CI.
 
 Every view distinguishes two kinds of time, per iteration and summed over threads (so either can exceed wall time):
 
@@ -144,7 +150,8 @@ Stored call trees are re-aggregated from the retained raw profiles when the aggr
 
 ## Statistics
 
-* Statistics are recomputed from Hyperfine's raw samples; exports whose summaries disagree are rejected.
+* Statistics are recomputed from Hyperfine's raw samples, with Hyperfine 1.x and 2.x (`schema_version: 2`)
+  exports both supported. Exports whose summaries disagree with their samples are rejected.
 * Comparisons use the ratio of medians (or means) with a seeded percentile-bootstrap 95% interval.
 * Verdicts (default threshold ±2%):
   * **regression** — CI entirely above 1 and the change exceeds the threshold;

@@ -34,6 +34,21 @@ jobs:
       - name: Browser tests
         run: bun test --timeout 120000 e2e
 
+  linux-profiling:
+    name: Linux profiling (runner setup, hyperfine, samply)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: package.json
+      - run: bun install --frozen-lockfile --production --filter @benchboard/cli
+      - name: Prepare the runner like a benchmark host
+        run: sudo BENCHBOARD_SOURCE="$PWD" sh deploy/linux-runner-setup.sh
+      - name: Benchmark, profile and compare
+        run: sh scripts/linux-profiling-smoke.sh
+
   image:
     name: Container image
     needs: check

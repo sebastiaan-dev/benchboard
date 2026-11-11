@@ -368,7 +368,7 @@ export function PullRequestPage() {
             <SelectTrigger size="sm" className="max-w-56" aria-label="Machine"><SelectValue placeholder="No measurements" /></SelectTrigger>
             <SelectContent>
               {report.machines.map((entry) => (
-                <SelectItem key={entry.machine.id} value={entry.machine.id}>{entry.machine.hostname} <span className="text-muted-foreground">· {entry.machine.cpu} · {entry.count}</span></SelectItem>
+                <SelectItem key={entry.machine.id} value={entry.machine.id}>{entry.machine.hostname} <span className="text-muted-foreground">· {entry.machine.platform ?? entry.machine.cpu} · {entry.count}</span></SelectItem>
               ))}
             </SelectContent>
           </Select>

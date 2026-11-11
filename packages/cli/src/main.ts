@@ -13,6 +13,7 @@ import { LocalBackend, type Backend, type ReportBundle } from "./backend.ts";
 import { RemoteBackend } from "./remote.ts";
 import { readLogin, removeLogin, resolveTarget, saveLogin, configFile } from "./config.ts";
 import { createServer, DEFAULT_PORT, serverOptionsFromEnv } from "./server.ts";
+import { samplyChecks, samplyFailureHint, samplyProblem } from "./samply.ts";
 
 const HELP = `benchboard — track Hyperfine benchmarks across commits and pull requests
 
@@ -43,6 +44,7 @@ Usage:
                                               Hottest functions by on-CPU (default) or sampled time
   benchboard profile diff <base-id> <head-id> [--limit n] [--metric cpu|sampled]
                                               Per-function time change between two profiles
+  benchboard profile check                    Whether samply can record here (Linux: perf access)
   benchboard runs [--limit n] [--all]         Recent runs
   benchboard query <graphql|@file> [--variables <json>]
                                               Execute a GraphQL document; prints JSON
@@ -381,7 +383,9 @@ export async function main(argv: string[]): Promise<number> {
 				if (iterations !== undefined && (!Number.isSafeInteger(iterations) || iterations < 1)) throw new Error("--iterations must be a positive integer.");
 				const printProfile = (profile: Profile, m: Measurement) => {
 					console.log(`Profile ${profile.id} → run ${m.runId} case ${m.position} [${m.caseKey}] @ ${m.commitSha?.slice(0, 10) ?? "?"}: ` +
-						`${profile.samples} samples, ${(profile.cpuMs / profile.iterations).toFixed(1)} ms on CPU and ${(profile.sampledMs / profile.iterations).toFixed(1)} ms sampled per iteration` +
+						`${profile.samples} samples, ${(profile.cpuMs / profile.iterations).toFixed(1)} ms on CPU` +
+						(profile.waitsSampled === false ? ` per iteration (${profile.platform ?? "Linux"}: waits not sampled)`
+							: ` and ${(profile.sampledMs / profile.iterations).toFixed(1)} ms sampled per iteration`) +
 						`${profile.cpuSource === "sample-count" ? " (no CPU deltas: CPU estimated from samples)" : ""}, ` +
 						`${(profile.symbolicatedShare * 100).toFixed(1)}% symbolicated${profile.symsSha256 ? "" : " (no .syms.json sidecar)"}`);
 				};
@@ -393,8 +397,20 @@ export async function main(argv: string[]): Promise<number> {
 					if (options.json) json(profile); else printProfile(profile, m);
 					return 0;
 				}
+				if (action === "check") {
+					const checks = samplyChecks();
+					if (options.json) json(checks);
+					else for (const check of checks) {
+						const mark = check.ok === true ? color("green", "ok  ") : check.ok === false ? color("red", "FAIL") : color("yellow", "note");
+						console.log(`${mark} ${check.name}: ${check.detail}${check.fix ? color("dim", `\n     ${check.fix}`) : ""}`);
+					}
+					return checks.some((check) => check.ok === false) ? 1 : 0;
+				}
 				if (action === "record") {
 					if (!args.length) throw new Error("Usage: benchboard profile record <run>[:<case>] [-- command...]");
+					// Fail before running the workload when samply cannot record here at all.
+					const problem = samplyProblem();
+					if (problem) throw new Error(`cannot profile on this machine: ${problem}`);
 					const measurement = await api.measurement(args[0]);
 					const command = args.length > 1 ? args.slice(1) : ["sh", "-c", measurement.command ?? measurement.exportedCommand];
 					const directory = fs.mkdtempSync(path.join(os.tmpdir(), "benchboard-samply-"));
@@ -403,7 +419,7 @@ export async function main(argv: string[]): Promise<number> {
 						const samply = Bun.spawnSync(["samply", "record", "--save-only", "--no-open", "--unstable-presymbolicate", "-o", output,
 							...(options.rate ? ["--rate", options.rate] : []), ...(iterations ? ["--iteration-count", String(iterations)] : []), ...command],
 						{ cwd, stdout: "inherit", stderr: "inherit" });
-						if (samply.exitCode !== 0) throw new Error(`samply exited with ${samply.exitCode}; is it installed and set up (\`samply setup\` on macOS)?`);
+						if (samply.exitCode !== 0) throw new Error(samplyFailureHint(samply.exitCode));
 						const { profile, measurement: m } = await api.attachProfile(measurement.id,
 							prepareProfile({ file: output, iterations, label: options.label, command: command.join(" "), cwd }));
 						if (options.json) json(profile); else printProfile(profile, m);
@@ -427,6 +443,9 @@ export async function main(argv: string[]): Promise<number> {
 					const [{ profile, measurement }, stats] = await Promise.all([api.profile(id), api.profileFunctions(id, metric, limit)]);
 					if (options.json) { json(stats); return 0; }
 					printProfile(profile, measurement);
+					if (metric === "sampled" && profile.waitsSampled === false) {
+						console.log(color("yellow", `note: recorded on ${profile.platform ?? "Linux"}, where samply samples running threads only; sampled time is on-CPU time.`));
+					}
 					console.log(`${"self".padStart(11)} ${"total".padStart(11)}  function · ${metricLabel} ms per iteration`);
 					for (const stat of stats) console.log(`${ms(stat.self)} ${ms(stat.total)}  ${clean(stat.name).slice(0, 120)}${stat.library ? color("dim", `  ${stat.library}`) : ""}`);
 					return 0;

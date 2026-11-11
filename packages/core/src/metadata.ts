@@ -40,6 +40,8 @@ export const MachineMetadata = z.object({
 	arch: z.string().min(1).max(64).default("unknown"),
 	cpu: z.string().min(1).max(256).default("unknown"),
 	ram: z.number().int().nonnegative().default(0),
+	/** Cloud instance type or similar, e.g. "Amazon EC2 c7g.2xlarge". */
+	platform: z.string().min(1).max(256).nullable().default(null),
 }).strict();
 
 export const IngestMetadata = z.object({

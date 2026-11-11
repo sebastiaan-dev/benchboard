@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, test } from "bun:test";
 import {
-	Store, decodeProfileBytes, diffFunctions, diffTrees, functionStats, mergeThreads, parseProfile, prune, sidecarPath,
+	Store, decodeProfileBytes, diffFunctions, diffTrees, functionStats, mainProgram, mergeThreads, parseProfile, prune, sidecarPath,
 	symbolicateRequest, totals,
 	type SymsSidecar,
 } from "../src/index.ts";
@@ -130,4 +130,49 @@ test("profiles attach to measurements with their sidecar and answer Firefox Prof
 	assert.equal(response.results[0].found_modules[`engine/${profile.libs[0].breakpadId}`], true);
 	store.deleteRun(measurements[0].runId);
 	assert.equal(store.profile(attached.id), undefined, "Profiles are deleted with their run.");
+});
+
+test("Linux samply profiles: on-CPU only, waits not sampled, placeholder names unsymbolicated", () => {
+	const linux = fixture("samply-linux-threads");
+	assert.equal(linux.platform, "Debian GNU/Linux 12 (bookworm)");
+	assert.equal(linux.waitsSampled, false);
+	assert.equal(linux.tree.cpuSource, "thread-cpu-delta");
+	// Three threads named after the process merge into one; the sleeps (3 × 150 ms) are invisible.
+	const work = linux.tree.threads.find((thread) => thread.name === "work")!;
+	assert.ok(Math.abs(work.sampledMs - work.cpuMs) < 2, JSON.stringify(work));
+	assert.ok(work.cpuMs > 150 && work.cpuMs < 400, String(work.cpuMs));
+	const cpu = new Map(functionStats(linux.tree, "cpu").map((stat) => [stat.name, stat]));
+	assert.ok(cpu.get("compare_keys")!.self / linux.tree.cpuMs > 0.95);
+	assert.ok(cpu.get("probe")!.total / linux.tree.cpuMs > 0.95, "frame pointers give complete stacks");
+	assert.ok(cpu.has("fun_81d50"), "placeholders keep their name");
+	assert.ok(linux.symbolicatedShare < 1, "but do not count as symbolicated");
+	assert.equal(fixture("samply-locks").waitsSampled, true);
+});
+
+test("diffs match functions of differently named base and head executables", () => {
+	const build = (program: string, compare: number) => {
+		const { profile, syms } = syntheticProfile(program, [{ name: "worker", stacks: [{ frames: ["main", "Probe", "CompareKeys"], samples: compare }] }]);
+		return parseProfile(profile, syms as SymsSidecar).tree;
+	};
+	const [base, head] = [build("duckdb-main", 40), build("duckdb-pr", 10)];
+	// The program is the library defining main, whatever samply's product name (e.g. `sh` for `sh -c`).
+	assert.equal(mainProgram(base), "duckdb-main");
+	assert.equal(diffFunctions(base, head).filter((entry) => entry.name === "CompareKeys").length, 1, "detected automatically");
+	const separate = diffFunctions(base, head, { programs: { base: "unrelated", head: "other" } }).filter((entry) => entry.name === "CompareKeys");
+	assert.equal(separate.length, 2, "with unrelated program names, they stay different libraries");
+	const [top] = diffFunctions(base, head, { programs: { base: "duckdb-main", head: "duckdb-pr" } });
+	assert.deepEqual([top.name, top.library, top.baseSelfMs, top.headSelfMs], ["CompareKeys", "duckdb-pr", 40, 10]);
+	const tree = diffTrees(base, head, { programs: { base: "duckdb-main", head: "duckdb-pr" } });
+	const names = tree.funcs.name.map((index) => tree.strings[index]);
+	assert.equal(names.filter((name) => name === "CompareKeys").length, 1, "one merged call path");
+});
+
+test("addresses outside every module collapse into one [unknown] frame", () => {
+	const { tree, platform } = fixture("samply-linux-pac");
+	assert.match(platform!, /^Amazon Linux 2023/);
+	const names = tree.funcs.name.map((index) => tree.strings[index]);
+	assert.equal(names.filter((name) => /^0x[0-9a-f]{10,}$/.test(name)).length, 0, "no per-sample garbage addresses");
+	const unknown = functionStats(tree, "cpu").find((stat) => stat.name === "[unknown]")!;
+	assert.ok(unknown.total / tree.cpuMs > 0.95, "it is the common root of the stacks");
+	assert.ok(functionStats(tree, "cpu").find((stat) => stat.name === "compare_keys")!.self / tree.cpuMs > 0.95);
 });

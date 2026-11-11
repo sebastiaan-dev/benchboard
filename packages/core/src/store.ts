@@ -132,6 +132,10 @@ export interface Profile {
 	threads: { name: string; samples: number; cpuMs: number; sampledMs: number }[];
 	symbolicatedShare: number;
 	nodeCount: number;
+	/** Recording OS reported by samply. */
+	platform: string | null;
+	/** Whether waiting threads were sampled too (macOS); if false, sampled time is on-CPU time. */
+	waitsSampled: boolean | null;
 	command: string | null;
 	recordedAt: string;
 }
@@ -191,9 +195,9 @@ const toRun = (row: unknown) => mapRow<Run>(row, { checkoutDirty: bool });
 const toCommit = (row: unknown) => mapRow<Commit>(row, { parents: (value: string) => JSON.parse(value) });
 const PROFILE_COLUMNS = `id, measurement_id, label, tool, sha256, syms_sha256, product, iterations, samples, interval_ms, duration_ms,
 	cpu_ms, sampled_ms, cpu_source,
-	threads, symbolicated_share, node_count, command, recorded_at`;
+	threads, symbolicated_share, node_count, command, recorded_at, platform, waits_sampled`;
 const toProfile = (row: unknown) => mapRow<Profile>(row, {
-	threads: (value: string) => JSON.parse(value) as Profile["threads"],
+	threads: (value: string) => JSON.parse(value) as Profile["threads"], waitsSampled: bool,
 });
 
 export function defaultHome(): string {
@@ -312,11 +316,13 @@ export class Store {
 	}
 
 	private upsertMachine(machine: MachineMetadata): number {
-		const fingerprint = createHash("sha256")
-			.update(JSON.stringify([machine.hostname, machine.os, machine.arch, machine.cpu, machine.ram])).digest("hex");
-		this.db.query(`INSERT INTO machine (fingerprint, hostname, os, arch, cpu, ram)
-			VALUES (:fingerprint, :hostname, :os, :arch, :cpu, :ram) ON CONFLICT (fingerprint) DO NOTHING`)
-			.run({ fingerprint, ...machine });
+		// The platform joins the identity only when known, so machines recorded before it existed keep theirs.
+		const identity: unknown[] = [machine.hostname, machine.os, machine.arch, machine.cpu, machine.ram];
+		if (machine.platform) identity.push(machine.platform);
+		const fingerprint = createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+		this.db.query(`INSERT INTO machine (fingerprint, hostname, os, arch, cpu, ram, platform)
+			VALUES (:fingerprint, :hostname, :os, :arch, :cpu, :ram, :platform) ON CONFLICT (fingerprint) DO NOTHING`)
+			.run({ fingerprint, ...machine, platform: machine.platform ?? null });
 		return (this.db.query("SELECT id FROM machine WHERE fingerprint = ?").get(fingerprint) as { id: number }).id;
 	}
 
@@ -454,10 +460,10 @@ export class Store {
 		if (symsBytes && symsSha256) store(`${symsSha256}.syms.json`, symsBytes);
 		const id = Number(this.db.query(`INSERT INTO profile (measurement_id, label, tool, sha256, syms_sha256, product, iterations,
 			samples, interval_ms, duration_ms, threads, symbolicated_share, node_count, command, recorded_at, tree, cpu_ms, sampled_ms,
-			cpu_source, tree_version)
+			cpu_source, tree_version, platform, waits_sampled)
 			VALUES (:measurement_id, :label, 'samply', :sha256, :syms_sha256, :product, :iterations, :samples, :interval_ms,
 			:duration_ms, :threads, :symbolicated_share, :node_count, :command, :recorded_at, :tree, :cpu_ms, :sampled_ms,
-			:cpu_source, :tree_version)`).run({
+			:cpu_source, :tree_version, :platform, :waits_sampled)`).run({
 			measurement_id: measurement.id, label: input.label ?? null, sha256, syms_sha256: symsSha256, product: parsed.product,
 			iterations: input.iterations ?? 1, command: input.command ?? null, recorded_at: new Date().toISOString(),
 			...this.profileColumns(parsed),
@@ -479,7 +485,8 @@ export class Store {
 			samples: parsed.tree.samples, interval_ms: parsed.tree.intervalMs, duration_ms: parsed.durationMs,
 			threads: JSON.stringify(parsed.tree.threads), symbolicated_share: parsed.symbolicatedShare,
 			node_count: parsed.tree.nodes.func.length, cpu_ms: parsed.tree.cpuMs, sampled_ms: parsed.tree.sampledMs,
-			cpu_source: parsed.tree.cpuSource, tree_version: TREE_VERSION,
+			cpu_source: parsed.tree.cpuSource, tree_version: TREE_VERSION, platform: parsed.platform,
+			waits_sampled: parsed.waitsSampled === null ? null : Number(parsed.waitsSampled),
 			tree: Bun.gzipSync(new TextEncoder().encode(JSON.stringify(parsed.tree))),
 		};
 	}
@@ -491,7 +498,8 @@ export class Store {
 		const failed: { id: number; error: string }[] = [];
 		const update = this.db.query(`UPDATE profile SET samples = :samples, interval_ms = :interval_ms, duration_ms = :duration_ms,
 			threads = :threads, symbolicated_share = :symbolicated_share, node_count = :node_count, cpu_ms = :cpu_ms,
-			sampled_ms = :sampled_ms, cpu_source = :cpu_source, tree_version = :tree_version, tree = :tree WHERE id = :id`);
+			sampled_ms = :sampled_ms, cpu_source = :cpu_source, tree_version = :tree_version, tree = :tree,
+			platform = :platform, waits_sampled = :waits_sampled WHERE id = :id`);
 		for (const row of outdated) {
 			try {
 				const raw = fs.readFileSync(path.join(this.home, "profiles", `${row.sha256}.json.gz`));

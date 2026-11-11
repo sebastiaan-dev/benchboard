@@ -32,9 +32,11 @@ export function ProfilePage() {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"self" | "total">("self");
   const [rows, setRows] = useState(40);
-  const [metric, setMetric] = useState<Metric>("cpu");
+  const [chosenMetric, setMetric] = useState<Metric>("cpu");
   const query = useGraphQL(ProfileQuery, { id });
   const profile = query.data?.profile;
+  // Where waits are not sampled, sampled time is on-CPU time: show the on-CPU view only.
+  const metric: Metric = profile?.waitsSampled === false ? "cpu" : chosenMetric;
   const tree = profile?.tree as CallTree | undefined;
   const threads = useThreadView(tree);
   useRepositoryScope(profile?.measurement.benchmark.repository.id);
@@ -102,7 +104,9 @@ export function ProfilePage() {
           <Stat label={profile.cpuSource === "SAMPLE_COUNT" ? "CPU (estimated)" : "On-CPU / iteration"} value={ms(profile.cpuMs)}
             tone={profile.cpuSource === "SAMPLE_COUNT" ? "warn" : undefined}
             detail={profile.cpuSource === "SAMPLE_COUNT" ? "no CPU deltas: includes waiting" : `all threads · ${profile.iterations} iteration${profile.iterations > 1 ? "s" : ""}`} />
-          <Stat label="Sampled / iteration" value={ms(profile.sampledMs)} detail={profile.sampledMs > profile.cpuMs * 1.05 ? `${ms(profile.sampledMs - profile.cpuMs)} off-CPU` : "mostly on CPU"} />
+          {profile.waitsSampled === false
+            ? <Stat label="Recorded on" value={<span className="truncate text-base">{profile.platform ?? "Linux"}</span>} detail="running threads only: waits not sampled" />
+            : <Stat label="Sampled / iteration" value={ms(profile.sampledMs)} detail={profile.sampledMs > profile.cpuMs * 1.05 ? `${ms(profile.sampledMs - profile.cpuMs)} off-CPU` : "mostly on CPU"} />}
           <Stat label="Wall median (hyperfine)" value={m.median ? ms(m.median * 1000) : "—"} detail={`${profile.samples.toLocaleString()} samples every ${profile.intervalMs} ms`} />
           <Stat label="Symbolicated" value={`${(profile.symbolicatedShare * 100).toFixed(1)}%`} tone={profile.symbolicatedShare < 0.9 ? "warn" : undefined}
             detail={profile.hasSymbols ? ".syms.json sidecar" : "no sidecar"} />
@@ -112,7 +116,7 @@ export function ProfilePage() {
       <Panel>
         <PanelHeader icon={Flame} title="Flame graph" subtitle={`Widths are ${metricLabel(metric)} time per iteration · inlined frames expanded · click to zoom`}
           actions={<>
-            <MetricToggle value={metric} onChange={setMetric} cpuSource={profile.cpuSource} />
+            <MetricToggle value={metric} onChange={setMetric} cpuSource={profile.cpuSource} waitsSampled={profile.waitsSampled} />
             <Input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Highlight functions…" className="h-8 w-56" />
           </>} />
         <div className="space-y-3 px-4 pb-4">

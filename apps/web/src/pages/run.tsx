@@ -36,7 +36,7 @@ const RunQuery = graphql(`
       checkoutDirty
       legacyId
       repository { id slug name }
-      machine { id hostname os arch cpu ram }
+      machine { id hostname os arch cpu ram platform }
       measurements {
         id position label caseKey command exportedCommand commitSha dirty commitInferred revision build notes status
         n mean median stddev min max q1 q3 p95 cv userTime systemTime rssMedian rssPeak times
@@ -138,7 +138,7 @@ export function RunPage() {
           <Stat label="Samples" value={samples.toLocaleString()} detail={`warmup ${run.warmup ?? "—"}`} />
           <Stat label="Paired comparisons" value={pairList.length}
             detail={pairList.length ? `${pairVerdicts.faster} faster · ${pairVerdicts.slower} slower · ${pairList.length - pairVerdicts.faster - pairVerdicts.slower} other` : "no repeated cases"} />
-          <Stat label="Machine" value={<span className="truncate text-base">{run.machine.hostname}</span>} detail={run.machine.cpu} />
+          <Stat label="Machine" value={<span className="truncate text-base">{run.machine.hostname}</span>} detail={run.machine.platform ?? run.machine.cpu} />
           {profiles > 0 && <Stat label="Profiles" value={profiles} detail="attached to cases" />}
         </StatStrip>
       </Panel>
@@ -241,7 +241,7 @@ export function RunPage() {
           <div className="px-4 pb-4">
             <KeyValues rows={[
               ["conditions", run.conditions], ["environment", run.environment], ["invocation", run.invocation], ["warmup", run.warmup],
-              ["machine", `${run.machine.hostname} · ${run.machine.cpu} · ${run.machine.os} ${run.machine.arch} · ${bytes(run.machine.ram)}`],
+              ["machine", `${run.machine.hostname} · ${run.machine.platform ? `${run.machine.platform} · ` : ""}${run.machine.cpu} · ${run.machine.os} ${run.machine.arch} · ${bytes(run.machine.ram)}`],
               ["checkout", run.checkoutPath && <>{run.checkoutPath}{run.checkoutBranch ? ` (${run.checkoutBranch})` : ""} @ {run.checkoutHead?.slice(0, 10)}{run.checkoutDirty ? " // dirty" : ""}</>],
               ["raw export", run.exportPath], ["notes", run.notes],
             ]} />

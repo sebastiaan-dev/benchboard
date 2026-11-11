@@ -29,7 +29,8 @@ export interface CallTree {
 export type CpuSource = "thread-cpu-delta" | "sample-count";
 export type Metric = "cpu" | "sampled";
 
-export const TREE_VERSION = 2;
+/** Bumped whenever aggregation changes; older profiles are re-aggregated from their raw files. 3: platform, waits; 4: [unknown] frames. */
+export const TREE_VERSION = 4;
 export const THREAD_LIBRARY = "(thread)";
 
 export function functionName(tree: Pick<CallTree, "strings" | "funcs">, func: number): string {
@@ -231,13 +232,39 @@ export interface FunctionDelta {
 export interface DiffOptions {
 	metric?: Metric;
 	iterations?: { base?: number; head?: number };
+	/**
+	 * The profiled program's library on each side; detected from the trees (see mainProgram) when
+	 * omitted. Base and head builds are often different files (`./duckdb-main`, `./duckdb-pr`); their
+	 * frames are matched by function name as if they were one library, reported under the head's name.
+	 */
+	programs?: { base?: string | null; head?: string | null };
+}
+
+/**
+ * The profiled program's executable: the library that defines `main` (the heaviest one if several
+ * do), which is independent of how it was launched (`sh -c ./duckdb` reports `sh` as the product).
+ */
+export function mainProgram(tree: CallTree): string | null {
+	let best: FunctionStat | null = null;
+	for (const stat of functionStats(tree, "sampled")) {
+		if (stat.name === "main" && stat.library && stat.library !== THREAD_LIBRARY && (!best || stat.total > best.total)) best = stat;
+	}
+	return best?.library ?? null;
+}
+
+/** Maps the base program's library name to the head's, so the same function in both builds lines up. */
+function baseLibraryAlias(base: CallTree, head: CallTree, options: DiffOptions): (library: string | null) => string | null {
+	const from = options.programs?.base ?? mainProgram(base), to = options.programs?.head ?? mainProgram(head);
+	if (!from || !to || from === to) return (library) => library;
+	return (library) => library === from ? to : library;
 }
 
 /** Per-function change between two profiles (milliseconds per iteration), sorted by absolute self-time change. */
 export function diffFunctions(base: CallTree, head: CallTree, options: DiffOptions = {}): FunctionDelta[] {
 	const metric = options.metric ?? "cpu";
 	const key = (stat: FunctionStat) => `${stat.name}\0${stat.library ?? ""}`;
-	const a = new Map(functionStats(base, metric).map((stat) => [key(stat), stat]));
+	const alias = baseLibraryAlias(base, head, options);
+	const a = new Map(functionStats(base, metric).map((stat) => ({ ...stat, library: alias(stat.library) })).map((stat) => [key(stat), stat]));
 	const b = new Map(functionStats(head, metric).map((stat) => [key(stat), stat]));
 	const scale = { base: 1 / Math.max(1, options.iterations?.base ?? 1), head: 1 / Math.max(1, options.iterations?.head ?? 1) };
 	const totalA = metricTotal(base, metric), totalB = metricTotal(head, metric);
@@ -270,7 +297,8 @@ export function diffTrees(base: CallTree, head: CallTree, options: DiffOptions =
 	const grow = (node: number) => {
 		while (base_.length <= node) { base_.push(0); head_.push(0); baseSelf.push(0); headSelf.push(0); }
 	};
-	const add = (tree: CallTree, scale: number, total: number[], selfs: number[]) => {
+	const alias = baseLibraryAlias(base, head, options);
+	const add = (tree: CallTree, scale: number, total: number[], selfs: number[], library: (name: string | null) => string | null) => {
 		const children = childrenOf(tree);
 		const inclusive = totals(tree, metric);
 		const self = tree.nodes[metric];
@@ -284,13 +312,13 @@ export function diffTrees(base: CallTree, head: CallTree, options: DiffOptions =
 			for (const child of children[node]) {
 				const func = tree.nodes.func[child];
 				let mapped = funcs.get(func);
-				if (mapped === undefined) funcs.set(func, mapped = builder.func(functionName(tree, func), functionLibrary(tree, func)));
+				if (mapped === undefined) funcs.set(func, mapped = builder.func(functionName(tree, func), library(functionLibrary(tree, func))));
 				stack.push([child, builder.child(target, mapped)]);
 			}
 		}
 	};
-	add(base, 1 / Math.max(1, options.iterations?.base ?? 1), base_, baseSelf);
-	add(head, 1 / Math.max(1, options.iterations?.head ?? 1), head_, headSelf);
+	add(base, 1 / Math.max(1, options.iterations?.base ?? 1), base_, baseSelf, alias);
+	add(head, 1 / Math.max(1, options.iterations?.head ?? 1), head_, headSelf, (name) => name);
 	grow(builder.nodes.func.length - 1);
 	return {
 		strings: builder.strings, funcs: builder.funcs,

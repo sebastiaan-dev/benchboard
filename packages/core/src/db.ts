@@ -171,6 +171,14 @@ const MIGRATIONS: string[] = [
 	);
 	CREATE UNIQUE INDEX api_token_active_name ON api_token (name) WHERE revoked_at IS NULL;
 	`,
+	`
+	-- Where a profile was recorded, and whether its sampler also sampled waiting threads (macOS samply
+	-- does, Linux perf and Windows ETW do not). Filled by re-aggregation (tree_version 3+).
+	ALTER TABLE profile ADD COLUMN platform TEXT;
+	ALTER TABLE profile ADD COLUMN waits_sampled INTEGER;
+	-- Cloud instance type or similar, when known (e.g. "Amazon EC2 c7g.2xlarge").
+	ALTER TABLE machine ADD COLUMN platform TEXT;
+	`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

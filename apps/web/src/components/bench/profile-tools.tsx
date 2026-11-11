@@ -18,6 +18,8 @@ export const ProfileHeaderFields = graphql(`
     cpuMs
     sampledMs
     cpuSource
+    platform
+    waitsSampled
     durationMs
     symbolicatedShare
     hasSymbols
@@ -91,8 +93,21 @@ export function ThreadControls({ tree, state }: { tree: CallTree; state: ThreadS
   );
 }
 
-/** On-CPU vs sampled time. Sampled time includes waiting, sleeping and blocking (where wall time goes). */
-export function MetricToggle({ value, onChange, cpuSource }: { value: Metric; onChange: (metric: Metric) => void; cpuSource: string }) {
+/**
+ * On-CPU vs sampled time. Sampled time includes waiting, sleeping and blocking (where wall time goes),
+ * but only where the sampler records waiting threads (macOS). Elsewhere both are on-CPU time, so there
+ * is nothing to toggle.
+ */
+export function MetricToggle({ value, onChange, cpuSource, waitsSampled }: {
+  value: Metric; onChange: (metric: Metric) => void; cpuSource: string; waitsSampled: boolean | null | undefined;
+}) {
+  if (waitsSampled === false) {
+    return (
+      <Hint content="samply on Linux (perf) only samples running threads, so this profile shows on-CPU time. Time spent sleeping, blocked or waiting for I/O is not recorded; compare wall-clock timings for that.">
+        <span className="text-muted-foreground inline-flex h-8 items-center rounded-lg border border-dashed px-2.5 text-xs">On-CPU only · waits not sampled</span>
+      </Hint>
+    );
+  }
   return (
     <Hint content={cpuSource === "SAMPLE_COUNT"
       ? "This profile has no per-sample CPU deltas, so CPU time is estimated from samples and includes off-CPU time."

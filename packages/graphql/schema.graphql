@@ -237,6 +237,8 @@ type Machine {
   arch: String!
   cpu: String!
   ram: Float!
+  "Cloud instance type or similar, e.g. \"Amazon EC2 c7g.2xlarge\"."
+  platform: String
 }
 
 type Run {
@@ -343,6 +345,13 @@ type Profile {
   recordedAt: String!
   sha256: String!
   hasSymbols: Boolean!
+  "Recording OS as samply reports it, e.g. \"macOS 15.3\" or \"Amazon Linux 2023\"."
+  platform: String
+  """
+  Whether threads were also sampled while waiting (sleeping, blocked, in I/O): true for macOS samply.
+  When false (Linux perf, Windows ETW), sampled time is on-CPU time and waits are not visible. Null if unknown.
+  """
+  waitsSampled: Boolean
   "Raw profile download (gzip JSON)."
   rawPath: String!
   "Opens the raw profile in the Firefox Profiler, symbolicated by this server (signed, expiring links when the server requires authentication)."

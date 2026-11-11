@@ -29,7 +29,7 @@ const BenchmarkQuery = graphql(`
         measurements(limit: 300) {
           id label median mean q1 q3 min max n dirty status commitSha recordedAt build
           commit { subject committedAt authoredAt }
-          run { id title machine { id hostname cpu } }
+          run { id title machine { id hostname cpu platform } }
           profiles { id }
         }
       }
@@ -132,7 +132,7 @@ export function BenchmarkPage() {
               <Select value={machineId ?? ""} onValueChange={(value) => set("machine", value)} disabled={machineList.length < 2}>
                 <SelectTrigger size="sm" className="min-w-44"><SelectValue /></SelectTrigger>
                 <SelectContent>{machineList.map((entry) => (
-                  <SelectItem key={entry.id} value={entry.id}>{entry.hostname} · {entry.cpu} ({all.filter((m) => m.run.machine.id === entry.id).length})</SelectItem>
+                  <SelectItem key={entry.id} value={entry.id}>{entry.hostname} · {entry.platform ?? entry.cpu} ({all.filter((m) => m.run.machine.id === entry.id).length})</SelectItem>
                 ))}</SelectContent>
               </Select>
             </>} />

@@ -105,6 +105,8 @@ export type Machine = {
   hostname: Scalars['String']['output'];
   id: Scalars['ID']['output'];
   os: Scalars['String']['output'];
+  /** Cloud instance type or similar, e.g. "Amazon EC2 c7g.2xlarge". */
+  platform?: Maybe<Scalars['String']['output']>;
   ram: Scalars['Float']['output'];
 };
 
@@ -232,6 +234,8 @@ export type Profile = {
   label?: Maybe<Scalars['String']['output']>;
   measurement: Measurement;
   nodeCount: Scalars['Int']['output'];
+  /** Recording OS as samply reports it, e.g. "macOS 15.3" or "Amazon Linux 2023". */
+  platform?: Maybe<Scalars['String']['output']>;
   product?: Maybe<Scalars['String']['output']>;
   /** Raw profile download (gzip JSON). */
   rawPath: Scalars['String']['output'];
@@ -249,6 +253,11 @@ export type Profile = {
   topFunctions: Array<ProfileFunction>;
   /** Aggregated call tree (see @benchboard/core CallTree). */
   tree: Scalars['JSON']['output'];
+  /**
+   * Whether threads were also sampled while waiting (sleeping, blocked, in I/O): true for macOS samply.
+   * When false (Linux perf, Windows ETW), sampled time is on-CPU time and waits are not visible. Null if unknown.
+   */
+  waitsSampled?: Maybe<Scalars['Boolean']['output']>;
 };
 
 
@@ -844,6 +853,7 @@ export type MachineResolvers<ContextType = Context, ParentType extends Resolvers
   hostname?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   id?: Resolver<ResolversTypes['ID'], ParentType, ContextType>;
   os?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
+  platform?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   ram?: Resolver<ResolversTypes['Float'], ParentType, ContextType>;
 };
 
@@ -920,6 +930,7 @@ export type ProfileResolvers<ContextType = Context, ParentType extends Resolvers
   label?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   measurement?: Resolver<ResolversTypes['Measurement'], ParentType, ContextType>;
   nodeCount?: Resolver<ResolversTypes['Int'], ParentType, ContextType>;
+  platform?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   product?: Resolver<Maybe<ResolversTypes['String']>, ParentType, ContextType>;
   rawPath?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   recordedAt?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
@@ -932,6 +943,7 @@ export type ProfileResolvers<ContextType = Context, ParentType extends Resolvers
   tool?: Resolver<ResolversTypes['String'], ParentType, ContextType>;
   topFunctions?: Resolver<Array<ResolversTypes['ProfileFunction']>, ParentType, ContextType, RequireFields<ProfileTopFunctionsArgs, 'by' | 'limit' | 'metric'>>;
   tree?: Resolver<ResolversTypes['JSON'], ParentType, ContextType>;
+  waitsSampled?: Resolver<Maybe<ResolversTypes['Boolean']>, ParentType, ContextType>;
 };
 
 export type ProfileDiffResolvers<ContextType = Context, ParentType extends ResolversParentTypes['ProfileDiff'] = ResolversParentTypes['ProfileDiff']> = {

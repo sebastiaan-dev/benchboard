@@ -8,7 +8,7 @@ import { Database } from "bun:sqlite";
 
 import {
 	Store, bootstrapRatio, inferRevision, normalizeRemote, parseHyperfineExport, pullRequestReport, random, slug, statistics,
-	verdictFor, SCHEMA_VERSION, listTokens, prepareRun,
+	verdictFor, SCHEMA_VERSION, listTokens, prepareRun, linuxCpuModel, cloudPlatform,
 } from "../src/index.ts";
 
 // node:test-style cleanup registration on top of bun:test.
@@ -72,6 +72,29 @@ test("hyperfine exports are validated against their samples", () => {
 	assert.throws(() => parseHyperfineExport(Buffer.from(JSON.stringify({ results: [{ command: "a", times: [-1] }] }))), /nonnegative/);
 	const unverified = parseHyperfineExport(Buffer.from(JSON.stringify({ results: [{ command: "a", times: [1] }] })));
 	assert.equal(unverified[0].status, "unverified");
+});
+
+test("hyperfine 2 exports (schema_version 2: measurements with units) read like 1.x exports", () => {
+	const fixture = (name: string) => fs.readFileSync(path.join(import.meta.dir, "fixtures", name));
+	const [fast, slow] = parseHyperfineExport(fixture("hyperfine-2.0.0.json"));
+	assert.equal(fast.command, "sleep 0.01");
+	assert.equal(fast.times.length, 3);
+	assert.ok(fast.median > 0.01 && fast.median < 0.02, String(fast.median));
+	assert.ok(slow.median > fast.median);
+	assert.equal(fast.status, "passed");
+	assert.equal(fast.rssPeak, 2359296);
+	assert.ok(fast.user !== null && fast.user < 0.01);
+	const scan = parseHyperfineExport(fixture("hyperfine-2.0.0-scan.json"));
+	assert.deepEqual(scan.map((entry) => entry.parameters), [{ n: "1" }, { n: "2" }]);
+	// Summaries are still checked against the raw measurements.
+	const tampered = JSON.parse(fixture("hyperfine-2.0.0.json").toString());
+	tampered.results[0].summary.time_wall_clock.median *= 2;
+	assert.throws(() => parseHyperfineExport(Buffer.from(JSON.stringify(tampered))), /median disagrees/);
+	tampered.schema_version = 3;
+	assert.throws(() => parseHyperfineExport(Buffer.from(JSON.stringify(tampered))), /schema version 3/);
+	const signal = JSON.parse(fixture("hyperfine-2.0.0.json").toString());
+	delete signal.results[0].measurements[1].exit_code;
+	assert.equal(parseHyperfineExport(Buffer.from(JSON.stringify(signal)))[0].status, "failed");
 });
 
 test("remote normalization and slugs", () => {
@@ -306,13 +329,14 @@ test("schema upgrades keep a snapshot of the previous database; newer databases 
 	new Store(home).close();
 	const file = path.join(home, "benchboard.db");
 	assert.equal(fs.statSync(file).mode & 0o777, 0o600);
-	// Pretend the database predates the token table.
+	// Pretend the database is at version 3: before tokens and profile platforms.
 	const old = new Database(file);
 	old.run("DROP TABLE api_token");
-	old.run(`PRAGMA user_version = ${SCHEMA_VERSION - 1}`);
+	for (const [table, column] of [["profile", "platform"], ["profile", "waits_sampled"], ["machine", "platform"]]) old.run(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+	old.run("PRAGMA user_version = 3");
 	old.close();
 	const store = new Store(home);
-	assert.ok(fs.existsSync(`${file}.v${SCHEMA_VERSION - 1}.bak`));
+	assert.ok(fs.existsSync(`${file}.v3.bak`));
 	assert.equal(listTokens(store).length, 0);
 	store.db.run(`PRAGMA user_version = ${SCHEMA_VERSION + 1}`);
 	store.close();
@@ -335,4 +359,14 @@ test("prepared runs from clients are validated before anything is stored", () =>
 	const result = store.ingestPrepared(valid, { remote: true });
 	assert.equal(result.repository.localPath, null);
 	assert.equal(result.measurements[0].commitSha, "a".repeat(40));
+});
+
+test("machine descriptions on Linux: Arm CPUs by part number, EC2 instance types from DMI", () => {
+	const graviton3 = "processor\t: 0\nBogoMIPS\t: 2100.00\nFeatures\t: fp asimd\nCPU implementer\t: 0x41\nCPU architecture: 8\nCPU variant\t: 0x1\nCPU part\t: 0xd40\n";
+	assert.equal(linuxCpuModel(graviton3), "Arm Neoverse-V1 (Graviton3)");
+	assert.equal(linuxCpuModel("CPU implementer\t: 0x61\nCPU part\t: 0x000\n"), "Apple part 0x000");
+	assert.equal(linuxCpuModel("model name\t: Intel(R) Xeon(R) Platinum 8488C\n"), "Intel(R) Xeon(R) Platinum 8488C");
+	assert.equal(linuxCpuModel(""), null);
+	assert.equal(cloudPlatform("Amazon EC2", "c7g.2xlarge"), "Amazon EC2 c7g.2xlarge");
+	assert.equal(cloudPlatform("Apple Inc.", "Apple Virtualization Generic Platform"), null);
 });

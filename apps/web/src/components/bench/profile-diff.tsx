@@ -48,7 +48,8 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
   const [side, setSide] = useState<"head" | "base">("head");
   const [search, setSearch] = useState("");
   const [rows, setRows] = useState(inline ? 8 : 40);
-  const [metric, setMetric] = useState<Metric>("cpu");
+  const [chosenMetric, setMetric] = useState<Metric>("cpu");
+  const metric: Metric = query.data?.base?.waitsSampled === false || query.data?.head?.waitsSampled === false ? "cpu" : chosenMetric;
   const baseTree = query.data?.base?.tree as CallTree | undefined;
   const headTree = query.data?.head?.tree as CallTree | undefined;
   const baseThreads = useThreadView(baseTree);
@@ -75,16 +76,18 @@ export function ProfileDiffView({ baseId, headId, inline = false }: { baseId: st
   const total = metricMs(a, metric) ? metricMs(b, metric) / metricMs(a, metric) : 1;
   const maxDelta = Math.max(1e-9, ...functions.slice(0, rows).map((entry) => Math.abs(entry.headSelfMs - entry.baseSelfMs)));
   const crossMachine = a.measurement.run.machine.hostname !== b.measurement.run.machine.hostname;
+  const crossPlatform = a.platform !== null && b.platform !== null && a.platform !== b.platform;
 
   return (
     <Panel>
       <PanelHeader
         icon={GitCompare}
         title={inline ? "Where the time went" : "Differential profile"}
-        subtitle={`Merged by call path · ${metricLabel(metric)} ms per iteration${crossMachine ? " · ⚠ recorded on different machines" : ""}`}
+        subtitle={`Merged by call path · ${metricLabel(metric)} ms per iteration${crossPlatform ? ` · ⚠ recorded on different systems (${a.platform} → ${b.platform})` : crossMachine ? " · ⚠ recorded on different machines" : ""}`}
         actions={<>
           {inline && <Button variant="outline" size="sm" asChild><Link to={`/profiles/compare?base=${a.id}&head=${b.id}`}>Open full comparison</Link></Button>}
-          <MetricToggle value={metric} onChange={setMetric} cpuSource={a.cpuSource === "SAMPLE_COUNT" || b.cpuSource === "SAMPLE_COUNT" ? "SAMPLE_COUNT" : "THREAD_CPU_DELTA"} />
+          <MetricToggle value={metric} onChange={setMetric} cpuSource={a.cpuSource === "SAMPLE_COUNT" || b.cpuSource === "SAMPLE_COUNT" ? "SAMPLE_COUNT" : "THREAD_CPU_DELTA"}
+            waitsSampled={a.waitsSampled === false || b.waitsSampled === false ? false : a.waitsSampled ?? b.waitsSampled} />
           <Segmented value={side} onChange={setSide} options={[{ value: "head", label: "Head widths" }, { value: "base", label: "Base widths" }]} />
         </>}
       />

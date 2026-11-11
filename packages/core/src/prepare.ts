@@ -123,10 +123,48 @@ export function readBounded(file: string, limit = MAX_EXPORT_BYTES): Buffer {
 	}
 }
 
+const readText = (file: string) => {
+	try { return fs.readFileSync(file, "utf8").trim(); } catch { return null; }
+};
+
+/** Arm CPU part numbers (implementer 0x41) seen on cloud instances; Graviton generations in parentheses. */
+const ARM_PARTS: Record<string, string> = {
+	"0xd08": "Cortex-A72 (Graviton)", "0xd0c": "Neoverse-N1 (Graviton2)", "0xd40": "Neoverse-V1 (Graviton3)",
+	"0xd4f": "Neoverse-V2 (Graviton4)", "0xd84": "Neoverse-V3", "0xd8e": "Neoverse-N3", "0xd49": "Neoverse-N2",
+};
+const IMPLEMENTERS: Record<string, string> = { "0x41": "Arm", "0x61": "Apple", "0x51": "Qualcomm", "0xc0": "Ampere", "0x48": "HiSilicon" };
+
+/** Node reports "unknown" for Arm CPUs on Linux; /proc/cpuinfo has the implementer and part instead. */
+export function linuxCpuModel(cpuinfo: string): string | null {
+	const field = (name: string) => new RegExp(`^${name}\\s*:\\s*(.+)$`, "mi").exec(cpuinfo)?.[1]?.trim();
+	const model = field("model name") ?? field("Model name");
+	if (model) return model;
+	const implementer = field("CPU implementer")?.toLowerCase();
+	const part = field("CPU part")?.toLowerCase();
+	if (!implementer) return null;
+	if (implementer === "0x41" && part && ARM_PARTS[part]) return `Arm ${ARM_PARTS[part]}`;
+	return `${IMPLEMENTERS[implementer] ?? `implementer ${implementer}`}${part ? ` part ${part}` : ""}`;
+}
+
+/** EC2 Nitro instances expose their instance type through DMI, so no metadata-service call is needed. */
+export function cloudPlatform(vendor: string | null, product: string | null): string | null {
+	if (vendor === "Amazon EC2" && product && product !== "Not Specified") return `Amazon EC2 ${product}`;
+	return null;
+}
+
+/**
+ * The machine running this process. BENCHBOARD_MACHINE names it (instead of the hostname), which keeps
+ * one identity across ephemeral instances of the same kind, e.g. a CI fleet of identical EC2 runners.
+ */
 export function localMachine(): MachineMetadata {
+	const linux = os.platform() === "linux";
+	const reported = os.cpus()[0]?.model;
+	const cpu = reported && reported !== "unknown" ? reported : linux ? linuxCpuModel(readText("/proc/cpuinfo") ?? "") : null;
 	return {
-		hostname: os.hostname(), os: `${os.platform()} ${os.release()}`, arch: os.arch(),
-		cpu: os.cpus()[0]?.model ?? "Unknown", ram: os.totalmem(),
+		hostname: process.env.BENCHBOARD_MACHINE?.trim() || os.hostname(), os: `${os.platform()} ${os.release()}`, arch: os.arch(),
+		cpu: cpu ?? "Unknown", ram: os.totalmem(),
+		platform: process.env.BENCHBOARD_MACHINE_PLATFORM?.trim()
+			|| (linux ? cloudPlatform(readText("/sys/devices/virtual/dmi/id/sys_vendor"), readText("/sys/devices/virtual/dmi/id/product_name")) : null),
 	};
 }
 

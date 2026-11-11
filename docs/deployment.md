@@ -23,12 +23,23 @@ docker compose exec benchboard benchboard token create admin --scope admin
 
 The token is printed once. Open the web app and sign in with it.
 
+CI publishes multi-arch images (linux/amd64, linux/arm64) to `ghcr.io/sebastiaan-dev/benchboard`. The
+`edge` tag follows `main`, `sha-<commit>` tags pin a build, and version tags appear for `v*` releases.
+To use a published image instead of building one:
+
+```sh
+BENCHBOARD_IMAGE=ghcr.io/sebastiaan-dev/benchboard:edge docker compose up -d --no-build
+```
+
 On each benchmark machine:
 
 ```sh
 benchboard login http://localhost:4319           # paste a write token (input is hidden)
 benchboard ingest q1.json --meta meta.json --track-branch
 ```
+
+For Linux benchmark machines (EC2), see [linux-profiling.md](linux-profiling.md); it includes a setup
+script for runners.
 
 From then on, every command (`ingest`, `pr track|sync|report`, `profile attach|record|show|diff`, `runs`,
 `query`, `open`, `import-legacy`) goes to the server. You can also set `BENCHBOARD_SERVER` and

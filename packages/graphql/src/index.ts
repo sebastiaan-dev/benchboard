@@ -70,7 +70,9 @@ export const resolvers: Resolvers = {
 			const head = store.profile(id(args.head));
 			if (!base || !head) throw new Error("Unknown profile.");
 			const metric = args.metric ?? "cpu";
-			const functions = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), { metric, iterations: { base: base.iterations, head: head.iterations } })
+			const functions = diffFunctions(store.profileTree(base.id), store.profileTree(head.id), {
+				metric, iterations: { base: base.iterations, head: head.iterations },
+			})
 				.slice(0, bounded(args.limit, 200, 5000))
 				.map((entry) => ({ ...entry, deltaSelfMs: entry.headSelfMs - entry.baseSelfMs, deltaTotalMs: entry.headTotalMs - entry.baseTotalMs }));
 			return { base, head, metric, baseMs: perIteration(base, metric), headMs: perIteration(head, metric), functions };
