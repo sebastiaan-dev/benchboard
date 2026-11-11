@@ -34,20 +34,76 @@ jobs:
       - name: Browser tests
         run: bun test --timeout 120000 e2e
 
-  linux-profiling:
-    name: Linux profiling (runner setup, hyperfine, samply)
+  binaries:
+    name: Standalone binaries
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # git describe for the version
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version-file: package.json
-      - run: bun install --frozen-lockfile --production --filter @benchboard/cli
-      - name: Prepare the runner like a benchmark host
-        run: sudo BENCHBOARD_SOURCE="$PWD" sh deploy/linux-runner-setup.sh
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+      - name: Compile (linux and macOS, x64 and arm64)
+        run: bun scripts/build-binaries.ts --all
+      - name: The Linux binary runs on its own
+        run: |
+          ./dist/bin/benchboard-linux-x64 --version
+          ./dist/bin/benchboard-linux-x64 schema | head -1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: dist/bin/
+          if-no-files-found: error
+
+  linux-profiling:
+    name: Linux profiling (runner setup, hyperfine, samply)
+    needs: binaries
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist/bin
+      - name: Prepare the runner like a benchmark host, with the released binary
+        run: sudo BENCHBOARD_BINARY="$PWD/dist/bin/benchboard-linux-x64" sh deploy/linux-runner-setup.sh
       - name: Benchmark, profile and compare
         run: sh scripts/linux-profiling-smoke.sh
+
+  release:
+    name: Publish binaries
+    needs: [check, linux-profiling]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: binaries
+          path: dist/bin
+      - name: Tagged release
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: gh release create "$GITHUB_REF_NAME" dist/bin/* --generate-notes --verify-tag
+      - name: Rolling "edge" prerelease from main
+        if: github.ref == 'refs/heads/main'
+        run: |
+          git tag -f edge "$GITHUB_SHA" && git push -f origin refs/tags/edge
+          notes="Latest build of main ($GITHUB_SHA). Install on Linux: deploy/linux-runner-setup.sh"
+          if gh release view edge >/dev/null 2>&1; then
+            gh release upload edge dist/bin/* --clobber
+            gh release edit edge --prerelease --notes "$notes" --target "$GITHUB_SHA"
+          else
+            gh release create edge dist/bin/* --prerelease --title "edge" --notes "$notes" --target "$GITHUB_SHA"
+          fi
 
   image:
     name: Container image

@@ -17,12 +17,17 @@ benchboard profile check                        # as the user that runs benchmar
 [`deploy/linux-runner-setup.sh`](../deploy/linux-runner-setup.sh) installs:
 
 * hyperfine and samply, pinned release binaries;
-* Bun and the `benchboard` CLI;
+* the `benchboard` CLI as a standalone binary: no Bun or Node needed, checksum-verified. It defaults
+  to the rolling `edge` release built from `main`; pin a release with `BENCHBOARD_VERSION=v0.2.0`;
 * libc debug symbols.
 
 It also sets `kernel.perf_event_paranoid = 1`, persisted in `/etc/sysctl.d/90-benchboard-perf.conf`.
 It is idempotent and works as EC2 user data. It has been tested on Amazon Linux 2023, Ubuntu 24.04 and
 Debian, on arm64.
+
+Binaries for Linux and macOS (x64 and arm64) are attached to every
+[release](https://github.com/sebastiaan-dev/benchboard/releases). Each one is the whole CLI and also
+the server, with the web app embedded.
 
 After that, a run looks like it does on macOS:
 
@@ -31,6 +36,28 @@ hyperfine --export-json q1.json './build-main/duckdb -c "…"' './build-pr/duckd
 benchboard ingest q1.json --meta meta.json --pr 1234
 benchboard profile record <run-id>:2 --iterations 5     # profiles case 2's command with samply
 ```
+
+## Working from a headless runner
+
+* **Viewing results.** Without a browser:
+  * `benchboard run show latest` (or `<run-id>`) lists cases, medians and in-run comparisons;
+  * `benchboard pr report <ref>` gives the commit-by-commit PR report;
+  * `benchboard profile show|diff` gives the hottest and changed functions.
+
+  Every command prints a link to the web app as well.
+* **Unreliable networks.** Uploads are retried with backoff on connection errors, timeouts, 429 and
+  502–504 (`BENCHBOARD_RETRIES`, default 5). Uploads carry idempotency keys, so a retry never stores a
+  run twice.
+
+  If the server stays unreachable, `ingest`, `profile record` and `profile attach` keep the upload in
+  `~/.local/state/benchboard/outbox` and exit with code 4. Any PR tracking you asked for is kept with
+  it. `benchboard push` delivers it later, and `benchboard whoami` shows how many uploads are waiting.
+
+  On spot or short-lived instances, run `benchboard push` before shutting down. Alternatively, put the
+  outbox (`XDG_STATE_HOME`) on a volume that survives the instance.
+* **No GitHub credentials needed.** `--pr 1234` and `pr track 1234` first try this machine's GitHub
+  access (`GITHUB_TOKEN`, `GH_TOKEN` or `gh`). If that fails, the server fetches the PR with its own
+  `GITHUB_TOKEN`, so runners need only their Benchboard token.
 
 ## What is different on Linux
 
@@ -112,4 +139,6 @@ steps:
       benchboard profile record "$run:2" --iterations 3
 ```
 
-`GITHUB_TOKEN` or `GH_TOKEN` in the step environment lets the CLI read the pull request from GitHub.
+With a `GITHUB_TOKEN` on the server, the runner needs no GitHub access of its own. A non-zero exit
+of 4 means the results are queued; add `benchboard push` as a final `if: always()` step on ephemeral
+runners.

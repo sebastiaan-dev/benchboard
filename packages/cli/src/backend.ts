@@ -7,14 +7,17 @@
 import { graphql, type ExecutionResult } from "graphql";
 import { z } from "zod";
 import {
-	SCHEMA_VERSION, diffFunctions, functionStats, parsePullRequestReference, pullRequestReport,
+	SCHEMA_VERSION, diffFunctions, functionStats, parsePullRequestReference, pullRequestReport, runComparisons, snapshotGithubPullRequest,
+	type Comparison, type RepositoryIdentity,
 	type Benchmark, type Commit, type FunctionDelta, type FunctionStat, type IngestResult, type Machine, type Measurement,
 	type Metric, type PreparedProfile, type PreparedRun, type Principal, type Profile, type PullRequest, type PullRequestReport,
 	type PullRequestSnapshot, type ReportOptions, type Repository, type Run, type Store,
 } from "@benchboard/core";
 import { createContext, createSchema, type Links } from "@benchboard/graphql";
 
-export const VERSION = "0.1.0";
+// Set by scripts/build-binaries.ts (`--define`), e.g. "0.1.0+3f2c1ab"; source checkouts report the package version.
+declare const BENCHBOARD_VERSION: string | undefined;
+export const VERSION: string = typeof BENCHBOARD_VERSION === "string" ? BENCHBOARD_VERSION : "0.1.0";
 
 export interface ReportBundle {
 	report: PullRequestReport;
@@ -30,6 +33,14 @@ export interface ProfileDetail {
 export interface TrackedPullRequest {
 	pullRequest: PullRequest;
 	commitCount: number;
+}
+export interface RunDetail {
+	run: Run;
+	repository: Repository;
+	machine: Machine;
+	measurements: (Measurement & { benchmarkKey: string; profileCount: number })[];
+	/** Later cases of a series against the run's first case of it (see runComparisons). */
+	comparisons: Comparison[];
 }
 export interface Identity {
 	principal: Principal;
@@ -56,7 +67,13 @@ export interface Backend {
 	profileFunctions(id: number, metric: Metric, limit: number): Promise<FunctionStat[]>;
 	profileDiff(base: number, head: number, metric: Metric, limit: number): Promise<FunctionDelta[]>;
 	legacyIds(): Promise<string[]>;
+	/** Fetches a GitHub PR where the backend runs (a server's own GitHub credentials) and stores it. */
+	syncGithubPullRequest(repository: RepositoryIdentity | null, reference: string, candidates: string[]): Promise<TrackedPullRequest>;
+	/** `reference`: a run ID, or "latest" (in `repositorySlug`, or anywhere). */
+	runDetail(repositorySlug: string | null, reference: string, options: { statistic?: "median" | "mean"; threshold?: number }): Promise<RunDetail>;
 	query(source: string, variables?: Record<string, unknown>): Promise<ExecutionResult>;
+	/** Calls a method by name with already-validated arguments (outbox replay). */
+	invoke(method: MethodName, args: unknown[]): Promise<unknown>;
 }
 
 const metric = z.enum(["cpu", "sampled"]);
@@ -86,6 +103,15 @@ export const METHODS = {
 	profileFunctions: { scope: "read", args: z.tuple([positive, metric, limit]) },
 	profileDiff: { scope: "read", args: z.tuple([positive, positive, metric, limit]) },
 	legacyIds: { scope: "read", args: z.tuple([]) },
+	syncGithubPullRequest: {
+		scope: "write",
+		args: z.tuple([z.unknown(), z.string().min(1).max(512), z.array(z.string().regex(/^[\w.-]+\/[\w.-]+$/)).max(16)]),
+	},
+	runDetail: {
+		scope: "read",
+		args: z.tuple([z.string().max(1024).nullable(), z.string().min(1).max(128),
+			z.object({ statistic: z.enum(["median", "mean"]).optional(), threshold: z.number().min(0).max(10).optional() }).strict()]),
+	},
 } as const satisfies Record<string, { scope: Principal["scope"]; args: z.ZodType<unknown[]> }>;
 export type MethodName = keyof typeof METHODS;
 
@@ -194,6 +220,36 @@ export class LocalBackend implements Backend {
 
 	async legacyIds() {
 		return this.store.legacyIds();
+	}
+
+	async syncGithubPullRequest(repository: RepositoryIdentity | null, reference: string, candidates: string[]) {
+		const parsed = parsePullRequestReference(reference);
+		const known = repository ? this.store.repositoryBySlug(repository.slug) : undefined;
+		const snapshot = await snapshotGithubPullRequest({
+			number: parsed.number,
+			candidates: parsed.githubRepo ? [parsed.githubRepo] : [...new Set([...candidates, ...(known?.githubRepo ? [known.githubRepo] : [])])],
+			repository,
+		});
+		return this.savePullRequest(snapshot);
+	}
+
+	async runDetail(repositorySlug: string | null, reference: string, options: { statistic?: "median" | "mean"; threshold?: number }): Promise<RunDetail> {
+		const store = this.store;
+		const run = reference === "latest"
+			? store.runs({ repositoryId: repositorySlug === null ? undefined : this.requireRepository(repositorySlug).id, limit: 1 })[0]
+			: store.run(reference);
+		if (!run) throw new Error(reference === "latest" ? "No runs recorded yet." : `Unknown run ${reference}.`);
+		const measurements = store.runMeasurements(run.id);
+		const profiles = store.profilesForMeasurements(measurements.map((m) => m.id));
+		return {
+			run, repository: store.repository(run.repositoryId)!, machine: store.machine(run.machineId)!,
+			measurements: measurements.map((m) => ({ ...m, benchmarkKey: store.benchmark(m.benchmarkId)!.key, profileCount: profiles.get(m.id)?.length ?? 0 })),
+			comparisons: runComparisons(store, run.id, options.statistic ?? "median", options.threshold ?? 0.02),
+		};
+	}
+
+	invoke(method: MethodName, args: unknown[]): Promise<unknown> {
+		return (this[method] as (...values: unknown[]) => Promise<unknown>).apply(this, args);
 	}
 
 	async query(source: string, variables?: Record<string, unknown>) {

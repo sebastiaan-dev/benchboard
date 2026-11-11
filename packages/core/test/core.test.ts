@@ -332,7 +332,11 @@ test("schema upgrades keep a snapshot of the previous database; newer databases 
 	// Pretend the database is at version 3: before tokens and profile platforms.
 	const old = new Database(file);
 	old.run("DROP TABLE api_token");
-	for (const [table, column] of [["profile", "platform"], ["profile", "waits_sampled"], ["machine", "platform"]]) old.run(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+	old.run("DROP INDEX run_upload");
+	old.run("DROP INDEX profile_upload");
+	for (const [table, column] of [["profile", "platform"], ["profile", "waits_sampled"], ["machine", "platform"], ["run", "upload_id"], ["profile", "upload_id"]]) {
+		old.run(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+	}
 	old.run("PRAGMA user_version = 3");
 	old.close();
 	const store = new Store(home);
@@ -359,6 +363,12 @@ test("prepared runs from clients are validated before anything is stored", () =>
 	const result = store.ingestPrepared(valid, { remote: true });
 	assert.equal(result.repository.localPath, null);
 	assert.equal(result.measurements[0].commitSha, "a".repeat(40));
+	// Retrying the same upload (a lost response) returns the stored run instead of failing or duplicating.
+	const again = store.ingestPrepared(valid, { remote: true });
+	assert.equal(again.run.id, result.run.id);
+	assert.match(again.warnings.at(-1)!, /already stored/);
+	assert.equal(store.runCount(), 1);
+	assert.throws(() => store.ingestPrepared({ ...valid, uploadId: "a-new-upload" }), /already ingested/);
 });
 
 test("machine descriptions on Linux: Arm CPUs by part number, EC2 instance types from DMI", () => {

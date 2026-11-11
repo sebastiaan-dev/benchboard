@@ -47,14 +47,20 @@ export function setup(scope: { after: (fn: () => void) => void } = t, extraEnv: 
 	const cli = run(env);
 	/** The same CLI with other environment variables, e.g. to talk to a server. */
 	const cliWith = (overrides: Record<string, string | undefined>) => run({ ...env, ...overrides });
-	return { root, repo, home, env, git, cli, cliWith };
+	/** Like cliWith, without blocking this process (needed when it serves something the CLI calls). */
+	const cliAsync = (overrides: Record<string, string | undefined>) => async (...args: string[]) => {
+		const child = Bun.spawn([process.execPath, bin, ...args], { cwd: repo, env: { ...env, ...overrides }, stdout: "pipe", stderr: "pipe" });
+		const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+		return { code, stdout, stderr };
+	};
+	return { root, repo, home, env, git, cli, cliWith, cliAsync };
 }
 
 export const series = (center: number, n = 20) => Array.from({ length: n }, (_, i) => center * (1 + ((i * 7919) % 13 - 6) / 600));
 
 /** Starts `benchboard serve` and resolves once it listens. */
-export async function startServer(scope: { after: (fn: () => void) => void }, env: Record<string, string | undefined>, cwd: string, args: string[] = []) {
-	const port = 43000 + Math.floor(Math.random() * 2000);
+export async function startServer(scope: { after: (fn: () => void) => void }, env: Record<string, string | undefined>, cwd: string, args: string[] = [],
+	port = 43000 + Math.floor(Math.random() * 2000)) {
 	const server = spawn(process.execPath, [bin, "serve", "--port", String(port), ...args], { cwd, env, stdio: ["ignore", "ignore", "pipe"] });
 	scope.after(() => server.kill());
 	let log = "";
@@ -65,7 +71,8 @@ export async function startServer(scope: { after: (fn: () => void) => void }, en
 		});
 		server.once("exit", (code) => reject(new Error(`server exited with ${code}: ${log}`)));
 	});
-	return { port, url: `http://127.0.0.1:${port}`, process: server, log: () => log };
+	const stopped = new Promise<void>((resolve) => server.once("exit", () => resolve()));
+	return { port, url: `http://127.0.0.1:${port}`, process: server, log: () => log, stop: () => { server.kill(); return stopped; } };
 }
 
 export { assert };

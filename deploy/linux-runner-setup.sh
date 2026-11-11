@@ -1,14 +1,17 @@
 #!/bin/sh
 # Prepares a Linux host (EC2 or any VM) to run benchmarks and record CPU profiles for Benchboard:
-# hyperfine, samply, Bun and the benchboard CLI, perf access for samply, and libc debug symbols.
+# hyperfine, samply and the benchboard CLI (a standalone binary), perf access for samply, and libc
+# debug symbols.
 #
 #   curl -fsSL https://raw.githubusercontent.com/sebastiaan-dev/benchboard/main/deploy/linux-runner-setup.sh | sudo sh
 #
 # Supports apt (Debian, Ubuntu) and dnf (Amazon Linux 2023, Fedora, RHEL) on x86_64 and aarch64.
 # Environment:
-#   SAMPLY_VERSION, HYPERFINE_VERSION, BUN_VERSION   pinned tool versions
-#   BENCHBOARD_REPO, BENCHBOARD_REF                  where the CLI comes from (default: GitHub, main)
-#   BENCHBOARD_SOURCE                                use a local checkout instead of cloning
+#   SAMPLY_VERSION, HYPERFINE_VERSION                pinned tool versions
+#   BENCHBOARD_VERSION                               release of the CLI binary: "edge" (main, default) or a tag like v0.2.0
+#   BENCHBOARD_BINARY                                install this benchboard binary instead of downloading one
+#   BENCHBOARD_SOURCE                                run the CLI from this checkout instead (installs Bun)
+#   BUN_VERSION                                      Bun for BENCHBOARD_SOURCE
 #   PERF_PARANOID                                    kernel.perf_event_paranoid to set (default 1; "keep" to leave it)
 #   KERNEL_SYMBOLS=1                                 also set kernel.kptr_restrict=0 (names kernel frames)
 set -eu
@@ -16,8 +19,8 @@ set -eu
 SAMPLY_VERSION=${SAMPLY_VERSION:-0.13.1}
 HYPERFINE_VERSION=${HYPERFINE_VERSION:-2.0.0}
 BUN_VERSION=${BUN_VERSION:-1.4.2}
-BENCHBOARD_REPO=${BENCHBOARD_REPO:-https://github.com/sebastiaan-dev/benchboard.git}
-BENCHBOARD_REF=${BENCHBOARD_REF:-main}
+BENCHBOARD_VERSION=${BENCHBOARD_VERSION:-edge}
+RELEASES=${BENCHBOARD_RELEASES:-https://github.com/sebastiaan-dev/benchboard/releases/download}
 PERF_PARANOID=${PERF_PARANOID:-1}
 PREFIX=/usr/local
 
@@ -25,8 +28,8 @@ log() { printf '\033[1m==> %s\033[0m\n' "$*"; }
 [ "$(id -u)" -eq 0 ] || { echo "Run as root (sudo)." >&2; exit 1; }
 
 case "$(uname -m)" in
-	x86_64|amd64) arch=x86_64 ;;
-	aarch64|arm64) arch=aarch64 ;;
+	x86_64|amd64) arch=x86_64; goarch=x64 ;;
+	aarch64|arm64) arch=aarch64; goarch=arm64 ;;
 	*) echo "Unsupported architecture $(uname -m)" >&2; exit 1 ;;
 esac
 
@@ -63,26 +66,26 @@ install -m 0755 "/tmp/hyperfine-v$HYPERFINE_VERSION-$arch-unknown-linux-gnu/hype
 rm -rf "/tmp/hyperfine-v$HYPERFINE_VERSION-$arch-unknown-linux-gnu"
 hyperfine --version
 
-log "Bun $BUN_VERSION"
-if ! command -v bun >/dev/null 2>&1 || [ "$(bun --version)" != "$BUN_VERSION" ]; then
-	download https://bun.sh/install | BUN_INSTALL="$PREFIX" bash -s "bun-v$BUN_VERSION" >/dev/null
-fi
-bun --version
-
 log "benchboard CLI"
 if [ -n "${BENCHBOARD_SOURCE:-}" ]; then
-	install_dir=$BENCHBOARD_SOURCE
-else
-	install_dir=/opt/benchboard
-	if [ -d "$install_dir/.git" ]; then
-		git -C "$install_dir" fetch -q origin "$BENCHBOARD_REF" && git -C "$install_dir" checkout -q FETCH_HEAD
-	else
-		git clone -q --depth 1 --branch "$BENCHBOARD_REF" "$BENCHBOARD_REPO" "$install_dir"
+	# From a checkout: needs Bun.
+	if ! command -v bun >/dev/null 2>&1 || [ "$(bun --version)" != "$BUN_VERSION" ]; then
+		download https://bun.sh/install | BUN_INSTALL="$PREFIX" bash -s "bun-v$BUN_VERSION" >/dev/null
 	fi
-	(cd "$install_dir" && bun install --frozen-lockfile --production --filter @benchboard/cli >/dev/null)
+	printf '#!/bin/sh\nexec bun %s/packages/cli/bin/benchboard.ts "$@"\n' "$BENCHBOARD_SOURCE" > "$PREFIX/bin/benchboard"
+	chmod 0755 "$PREFIX/bin/benchboard"
+elif [ -n "${BENCHBOARD_BINARY:-}" ]; then
+	install -m 0755 "$BENCHBOARD_BINARY" "$PREFIX/bin/benchboard"
+else
+	# A standalone binary (CLI and server, no runtime needed), verified against the release checksums.
+	name="benchboard-linux-$goarch"
+	download "$RELEASES/$BENCHBOARD_VERSION/$name" > "/tmp/$name"
+	download "$RELEASES/$BENCHBOARD_VERSION/SHA256SUMS" | grep " $name\$" > /tmp/benchboard.sha256
+	(cd /tmp && sha256sum -c benchboard.sha256 >/dev/null) || { echo "Checksum mismatch for $name" >&2; exit 1; }
+	install -m 0755 "/tmp/$name" "$PREFIX/bin/benchboard"
+	rm -f "/tmp/$name" /tmp/benchboard.sha256
 fi
-printf '#!/bin/sh\nexec bun %s/packages/cli/bin/benchboard.ts "$@"\n' "$install_dir" > "$PREFIX/bin/benchboard"
-chmod 0755 "$PREFIX/bin/benchboard"
+benchboard --version
 
 # samply uses perf events; regular users need perf_event_paranoid <= 1. This is host-wide.
 if [ "$PERF_PARANOID" != keep ]; then

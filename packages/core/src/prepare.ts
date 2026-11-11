@@ -30,6 +30,8 @@ export interface PreparedProfile {
 	iterations?: number;
 	label?: string;
 	command?: string;
+	/** Idempotency key, as for runs. */
+	uploadId?: string;
 }
 
 /** A Hyperfine export with every case attributed to a commit, ready to store anywhere. */
@@ -48,6 +50,8 @@ export interface PreparedRun {
 	legacyId?: string;
 	profiles: (PreparedProfile & { caseIndex: number })[];
 	warnings: string[];
+	/** Idempotency key: storing the same upload twice returns the first result (safe retries). */
+	uploadId?: string;
 }
 
 /** A pull request (GitHub) or branch (local) with its commits, ready to store. */
@@ -97,6 +101,9 @@ export interface ProfileInput {
 	command?: string;
 	cwd?: string;
 }
+
+export const newUploadId = () => crypto.randomUUID();
+const uploadId = z.string().regex(/^[\w-]{8,64}$/).optional();
 
 export function sidecarPath(file: string): string {
 	return file.replace(/\.gz$/, "").replace(/(\.json)?$/, ".json.syms.json");
@@ -176,7 +183,7 @@ export function prepareProfile(input: ProfileInput): PreparedProfile {
 		bytes: readBounded(file, MAX_PROFILE_BYTES),
 		syms: symsFile ? readBounded(symsFile, MAX_PROFILE_BYTES) : null,
 		symsName: symsFile ? path.basename(symsFile) : null,
-		iterations: input.iterations, label: input.label, command: input.command,
+		iterations: input.iterations, label: input.label, command: input.command, uploadId: newUploadId(),
 	};
 }
 
@@ -243,7 +250,7 @@ export function prepareRun(input: IngestInput): PreparedRun {
 	return {
 		export: bytes, sourcePath: source, metadata, repository: identity, checkout, cases: resolved,
 		commits: [...commits.values()], machine: meta.machine ?? localMachine(),
-		recordedAt: input.internal?.recordedAt, legacyId: input.internal?.legacyId, profiles, warnings,
+		recordedAt: input.internal?.recordedAt, legacyId: input.internal?.legacyId, profiles, warnings, uploadId: newUploadId(),
 	};
 }
 
@@ -295,6 +302,7 @@ const RepositoryIdentitySchema = z.object({
 const PreparedProfileSchema = z.object({
 	bytes, syms: bytes.nullable(), symsName: short(4096).nullable(),
 	iterations: z.number().int().positive().optional(), label: short(200).optional(), command: short(16_384).optional(),
+	uploadId,
 }).strict();
 
 const PreparedRunSchema = z.object({
@@ -312,6 +320,7 @@ const PreparedRunSchema = z.object({
 	legacyId: short(256).optional(),
 	profiles: z.array(PreparedProfileSchema.extend({ caseIndex: z.number().int().nonnegative() })).max(1024),
 	warnings: z.array(short(4096)).max(1024),
+	uploadId,
 }).strict();
 
 const PullRequestSnapshotSchema = z.object({

@@ -117,3 +117,79 @@ test("server: remote ingest, scoped tokens, browser sessions, signed profile lin
 	assert.equal(cliWith({ BENCHBOARD_HOME: destination })("verify").code, 1);
 	assert.equal(fs.statSync(path.join(home, "secret.key")).mode & 0o777, 0o600);
 });
+
+/** A minimal GitHub REST API: one pull request whose commits are the test repository's topic branch. */
+function fakeGithub(scope: { after: (fn: () => void) => void }, git: (...args: string[]) => string) {
+	const commit = (sha: string) => {
+		const [parents, subject, date] = git("show", "-s", "--format=%P%x1f%s%x1f%cI", sha).split("\x1f");
+		return { sha, parents: parents.split(" ").filter(Boolean).map((parent) => ({ sha: parent })), author: null, commit: { message: subject, author: { name: "T", date }, committer: { date } } };
+	};
+	const server = Bun.serve({
+		port: 0,
+		fetch(request) {
+			const route = new URL(request.url).pathname;
+			if (route === "/repos/acme/engine/pulls/7") {
+				return Response.json({ number: 7, title: "Make it slower", html_url: "https://github.com/acme/engine/pull/7", state: "open", merged_at: null,
+					updated_at: "2026-11-11T00:00:00Z", user: { login: "dev" }, head: { ref: "topic", sha: git("rev-parse", "topic") }, base: { ref: "main", sha: git("rev-parse", "main") } });
+			}
+			if (route === "/repos/acme/engine/pulls/7/commits") return Response.json([commit(git("rev-parse", "topic"))]);
+			if (route.startsWith("/repos/acme/engine/commits/")) return Response.json(commit(route.split("/").pop()!));
+			return Response.json({ message: "Not Found" }, { status: 404 });
+		},
+	});
+	scope.after(() => server.stop(true));
+	return `http://127.0.0.1:${server.port}`;
+}
+
+test("server: unreachable servers queue uploads, push delivers them once; runners track PRs through the server", async () => {
+	const { root, repo, env, cli, cliAsync, git } = setup(t);
+	git("remote", "add", "origin", "https://github.com/acme/engine.git");
+	const github = fakeGithub(t, git);
+	// The server can reach GitHub; the runner cannot (and has no gh login to fall back on).
+	const serverEnv = { ...env, GITHUB_API_URL: github, GH_TOKEN: "server-token" };
+	let server = await startServer(t, serverEnv, repo, ["--auth", "token"]);
+	const token = cli("token", "create", "runner", "--scope", "write").stdout.trim();
+	const runner = cliAsync({ BENCHBOARD_HOME: undefined, BENCHBOARD_SERVER: server.url, BENCHBOARD_TOKEN: token, BENCHBOARD_RETRIES: "0",
+		XDG_STATE_HOME: path.join(root, "state"), GITHUB_API_URL: "http://127.0.0.1:9", GH_TOKEN: "runner-token" });
+	const exportFile = path.join(root, "bench.json");
+	fs.writeFileSync(exportFile, JSON.stringify({ results: [
+		{ command: "./old", times: series(1), exit_codes: series(1).map(() => 0) },
+		{ command: "./new", times: series(1.25), exit_codes: series(1).map(() => 0) },
+	] }));
+	const meta = path.join(root, "meta.json");
+	fs.writeFileSync(meta, JSON.stringify({ benchmark: "tpch/q1", cases: [{ case: "q1", commit: "main" }, { case: "q1", commit: "topic" }] }));
+
+	// Server down: nothing is lost.
+	await server.stop();
+	const queued = await runner("ingest", exportFile, "--meta", meta, "--pr", "7");
+	assert.equal(queued.code, 4, queued.stderr);
+	assert.match(queued.stderr, /Cannot reach[\s\S]*benchboard push/);
+	const outbox = path.join(root, "state", "benchboard", "outbox");
+	const [entry] = fs.readdirSync(outbox);
+	assert.ok(fs.existsSync(path.join(outbox, entry, "blob-0")), "the export travels as a file");
+	assert.match((await runner("push")).stderr, /kept; push again later/);
+
+	// Back up (same port, same data): push delivers the run and asks the server to track the PR.
+	server = await startServer(t, serverEnv, repo, ["--auth", "token"], server.port);
+	fs.cpSync(path.join(outbox, entry), path.join(root, "copy"), { recursive: true });
+	const pushed = await runner("push");
+	assert.equal(pushed.code, 0, pushed.stderr);
+	assert.match(pushed.stdout, /Pushed run/);
+	assert.deepEqual(fs.readdirSync(outbox), []);
+	// Delivering the same entry again (e.g. the first response was lost) does not duplicate the run.
+	fs.cpSync(path.join(root, "copy"), path.join(outbox, entry), { recursive: true });
+	assert.equal((await runner("push")).code, 0);
+	const runs = JSON.parse((await runner("runs", "--all", "--json")).stdout);
+	assert.equal(runs.length, 1);
+
+	// The PR was fetched by the server with its own GitHub access.
+	const prs = JSON.parse((await runner("pr", "list", "--all", "--json")).stdout);
+	assert.deepEqual(prs.map((pr: { title: string; number: number }) => [pr.number, pr.title]), [[7, "Make it slower"]]);
+	assert.match((await runner("pr", "track", "7")).stdout, /Tracking acme\/engine#7 .* with 1 commits/);
+
+	// A terminal view of the run, with the in-run comparison.
+	const show = await runner("run", "show", "latest");
+	assert.equal(show.code, 0, show.stderr);
+	assert.match(show.stdout, /tpch\/q1\/q1 .* \+25\.00% .* regression vs #1/);
+	assert.match(show.stdout, new RegExp(`${server.url}/runs/${runs[0].id}`));
+});

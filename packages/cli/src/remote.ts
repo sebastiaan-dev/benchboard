@@ -4,20 +4,45 @@ import { encodeArgs } from "./wire.ts";
 
 export class HttpError extends Error {
 	readonly status: number;
-	constructor(status: number, message: string) {
+	/** Worth retrying later: the server was unreachable, overloaded or restarting. */
+	readonly transient: boolean;
+	constructor(status: number, message: string, transient = false) {
 		super(message);
 		this.status = status;
+		this.transient = transient;
 	}
 }
 
-/** A Benchboard server reached over HTTP(S), authenticated with an API token. */
+/** Statuses that say "try again" (timeouts, rate limits, proxies in front of a restarting server). */
+const RETRYABLE = new Set([408, 425, 429, 502, 503, 504]);
+
+export interface RetryPolicy {
+	/** Attempts after the first. */
+	retries: number;
+	/** First delay; doubles each attempt, with jitter. */
+	baseDelayMs: number;
+}
+
+export const defaultRetryPolicy = (): RetryPolicy => ({
+	retries: Number.isSafeInteger(Number(process.env.BENCHBOARD_RETRIES)) ? Number(process.env.BENCHBOARD_RETRIES) : 5,
+	baseDelayMs: 1000,
+});
+
+/**
+ * A Benchboard server reached over HTTP(S), authenticated with an API token. Every method is safe to
+ * retry: reads trivially, uploads because they carry idempotency keys and PR snapshots are upserts.
+ */
 export class RemoteBackend implements Backend {
 	readonly webUrl: string;
 	private readonly token: string | null;
+	private readonly retry: RetryPolicy;
+	/** Called before each retry, e.g. to tell the user. */
+	onRetry: (attempt: number, delayMs: number, error: Error) => void = () => {};
 
-	constructor(url: string, token: string | null) {
+	constructor(url: string, token: string | null, retry: RetryPolicy = defaultRetryPolicy()) {
 		this.webUrl = normalizeServerUrl(url);
 		this.token = token;
+		this.retry = retry;
 	}
 
 	private headers(contentType: string | null): Record<string, string> {
@@ -28,21 +53,43 @@ export class RemoteBackend implements Backend {
 		};
 	}
 
-	private async call<T>(method: MethodName, ...args: unknown[]): Promise<T> {
-		const { body, contentType } = encodeArgs(args);
-		let response: Response;
+	private async withRetries<T>(attempt: () => Promise<T>): Promise<T> {
+		for (let tries = 0; ; tries++) {
+			try {
+				return await attempt();
+			} catch (error) {
+				if (!(error instanceof HttpError) || !error.transient || tries >= this.retry.retries) throw error;
+				const delay = this.retry.baseDelayMs * 2 ** tries * (0.75 + Math.random() * 0.5);
+				this.onRetry(tries + 1, delay, error);
+				await Bun.sleep(delay);
+			}
+		}
+	}
+
+	private async send(path: string, init: RequestInit): Promise<Response> {
 		try {
-			response = await fetch(`${this.webUrl}/api/v1/rpc/${method}`, { method: "POST", headers: this.headers(contentType), body });
+			return await fetch(`${this.webUrl}${path}`, init);
 		} catch (error) {
-			throw new Error(`Cannot reach ${this.webUrl}: ${(error as Error).message}`);
+			throw new HttpError(0, `Cannot reach ${this.webUrl}: ${(error as Error).message}`, true);
 		}
-		const payload = (await response.json().catch(() => null)) as { result?: T; error?: { message: string } } | null;
-		if (!response.ok || !payload || !("result" in payload)) {
-			const message = payload?.error?.message ?? `HTTP ${response.status} ${response.statusText}`;
-			const hint = response.status === 401 ? " Sign in with `benchboard login <url>` or set BENCHBOARD_TOKEN." : "";
-			throw new HttpError(response.status, `${this.webUrl}: ${message}${hint}`);
-		}
-		return payload.result as T;
+	}
+
+	private call<T>(method: MethodName, ...args: unknown[]): Promise<T> {
+		const { body, contentType } = encodeArgs(args);
+		return this.withRetries(async () => {
+			const response = await this.send(`/api/v1/rpc/${method}`, { method: "POST", headers: this.headers(contentType), body });
+			const payload = (await response.json().catch(() => null)) as { result?: T; error?: { message: string } } | null;
+			if (!response.ok || !payload || !("result" in payload)) {
+				const message = payload?.error?.message ?? `HTTP ${response.status} ${response.statusText}`;
+				const hint = response.status === 401 ? " Sign in with `benchboard login <url>` or set BENCHBOARD_TOKEN." : "";
+				throw new HttpError(response.status, `${this.webUrl}: ${message}${hint}`, RETRYABLE.has(response.status) || (!payload && response.status >= 500));
+			}
+			return payload.result as T;
+		});
+	}
+
+	invoke(method: MethodName, args: unknown[]): Promise<unknown> {
+		return this.call(method, ...args);
 	}
 
 	whoami = () => this.call<Identity>("whoami");
@@ -60,16 +107,21 @@ export class RemoteBackend implements Backend {
 	profileFunctions: Backend["profileFunctions"] = (id, metric, limit) => this.call("profileFunctions", id, metric, limit);
 	profileDiff: Backend["profileDiff"] = (base, head, metric, limit) => this.call("profileDiff", base, head, metric, limit);
 	legacyIds: Backend["legacyIds"] = () => this.call("legacyIds");
+	syncGithubPullRequest: Backend["syncGithubPullRequest"] = (repository, reference, candidates) =>
+		this.call("syncGithubPullRequest", repository, reference, candidates);
+	runDetail: Backend["runDetail"] = (slug, reference, options) => this.call("runDetail", slug, reference, options);
 
-	async query(source: string, variables?: Record<string, unknown>): Promise<ExecutionResult> {
-		const response = await fetch(`${this.webUrl}/graphql`, {
-			method: "POST",
-			headers: { ...this.headers("application/json"), accept: "application/graphql-response+json, application/json" },
-			body: JSON.stringify({ query: source, variables }),
+	query(source: string, variables?: Record<string, unknown>): Promise<ExecutionResult> {
+		return this.withRetries(async () => {
+			const response = await this.send("/graphql", {
+				method: "POST",
+				headers: { ...this.headers("application/json"), accept: "application/graphql-response+json, application/json" },
+				body: JSON.stringify({ query: source, variables }),
+			});
+			const body = await response.json().catch(() => null);
+			if (!body) throw new HttpError(response.status, `${this.webUrl}/graphql: HTTP ${response.status}`, RETRYABLE.has(response.status));
+			return body as ExecutionResult;
 		});
-		const body = await response.json().catch(() => null);
-		if (!body) throw new HttpError(response.status, `${this.webUrl}/graphql: HTTP ${response.status}`);
-		return body as ExecutionResult;
 	}
 }
 

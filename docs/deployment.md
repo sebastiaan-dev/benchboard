@@ -185,8 +185,20 @@ Tokens are part of the database, so a restored server accepts the same tokens.
 
 ## Without Docker
 
-The server is `bun packages/cli/bin/benchboard.ts serve`. You need Bun, plus the web app built once
-with `bun install && bun run build`.
+Every [release](https://github.com/sebastiaan-dev/benchboard/releases) has standalone binaries
+(`benchboard-linux-x64`, `-linux-arm64`, `-darwin-x64`, `-darwin-arm64`). Each one is the CLI and the
+server, with the web app embedded, and needs no runtime:
+
+```sh
+curl -fsSLo /usr/local/bin/benchboard https://github.com/sebastiaan-dev/benchboard/releases/download/edge/benchboard-linux-x64
+chmod +x /usr/local/bin/benchboard
+BENCHBOARD_HOME=/var/lib/benchboard BENCHBOARD_PUBLIC_URL=https://bench.example.com benchboard serve --host 0.0.0.0 --auth token
+```
+
+`bun scripts/build-binaries.ts [--all]` builds them from a checkout, after `bun run build`.
+
+From source, the server is `bun packages/cli/bin/benchboard.ts serve`. That needs Bun, plus the web app
+built once with `bun install && bun run build`.
 
 ```sh
 BENCHBOARD_HOME=/var/lib/benchboard BENCHBOARD_PUBLIC_URL=https://bench.example.com \

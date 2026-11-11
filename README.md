@@ -34,7 +34,11 @@ BENCHBOARD_HOME=/tmp/benchboard-demo bun benchboard serve --open
 For development, `bun run dev` runs the API server (port 4319, restarts on change) and Vite (port 5319,
 proxying `/graphql` and profile endpoints). Set `BENCHBOARD_HOME` to point both at a data directory.
 
-To put the CLI on `PATH`: `ln -s "$PWD/packages/cli/bin/benchboard.ts" ~/.local/bin/benchboard` (it runs with `bun`).
+To put the CLI on `PATH`, either:
+
+* link the script, which runs with `bun`: `ln -s "$PWD/packages/cli/bin/benchboard.ts" ~/.local/bin/benchboard`;
+* or download a standalone binary from the [releases](https://github.com/sebastiaan-dev/benchboard/releases)
+  (Linux and macOS, x64 and arm64), which needs no runtime and also contains the server with the web app.
 
 ## Tracking a pull request
 

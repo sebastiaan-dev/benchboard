@@ -5,7 +5,8 @@
  */
 export type Encoded = { body: string | FormData; contentType: string | null };
 
-export function encodeArgs(args: unknown[]): Encoded {
+/** JSON text with binary values replaced by `{ "$blob": i }`, plus the binary values. */
+export function serialize(args: unknown): { json: string; blobs: Uint8Array[] } {
 	const blobs: Uint8Array[] = [];
 	const json = JSON.stringify(args, function (_key, value) {
 		// JSON.stringify calls toJSON (Buffer) before the replacer; look at the raw holder value instead.
@@ -16,6 +17,23 @@ export function encodeArgs(args: unknown[]): Encoded {
 		}
 		return value;
 	});
+	return { json, blobs };
+}
+
+/** The inverse of serialize. */
+export function deserialize(json: string, blob: (index: number) => Uint8Array | undefined): unknown {
+	return JSON.parse(json, (_key, value) => {
+		if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && typeof value.$blob === "number") {
+			const data = blob(value.$blob);
+			if (!data) throw new Error(`Missing binary part ${value.$blob}.`);
+			return data;
+		}
+		return value;
+	});
+}
+
+export function encodeArgs(args: unknown[]): Encoded {
+	const { json, blobs } = serialize(args);
 	if (!blobs.length) return { body: json, contentType: "application/json" };
 	const form = new FormData();
 	form.set("args", json);
@@ -40,12 +58,5 @@ export async function decodeArgs(request: Request): Promise<unknown> {
 		if (blobs.size >= MAX_BLOBS) throw new Error("Too many binary parts.");
 		blobs.set(Number(match[1]), new Uint8Array(await value.arrayBuffer()));
 	}
-	return JSON.parse(args, (_key, value) => {
-		if (value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 1 && typeof value.$blob === "number") {
-			const blob = blobs.get(value.$blob);
-			if (!blob) throw new Error(`Missing binary part ${value.$blob}.`);
-			return blob;
-		}
-		return value;
-	});
+	return deserialize(args, (index) => blobs.get(index));
 }

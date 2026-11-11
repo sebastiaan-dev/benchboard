@@ -179,6 +179,13 @@ const MIGRATIONS: string[] = [
 	-- Cloud instance type or similar, when known (e.g. "Amazon EC2 c7g.2xlarge").
 	ALTER TABLE machine ADD COLUMN platform TEXT;
 	`,
+	`
+	-- Client-chosen idempotency keys: a retried or re-pushed upload returns what the first one stored.
+	ALTER TABLE run ADD COLUMN upload_id TEXT;
+	CREATE UNIQUE INDEX run_upload ON run (upload_id) WHERE upload_id IS NOT NULL;
+	ALTER TABLE profile ADD COLUMN upload_id TEXT;
+	CREATE UNIQUE INDEX profile_upload ON profile (upload_id) WHERE upload_id IS NOT NULL;
+	`,
 ];
 
 export const SCHEMA_VERSION = MIGRATIONS.length;

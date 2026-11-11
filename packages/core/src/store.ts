@@ -353,6 +353,11 @@ export class Store {
 		if (prepared.profiles.some((profile) => profile.caseIndex >= cases.length)) throw new Error("A profile refers to a case outside the export.");
 		if (meta.baseline !== undefined && meta.baseline > cases.length) throw new Error("Baseline is outside the exported cases.");
 		const warnings = [...prepared.warnings];
+		if (prepared.uploadId) {
+			// A retried upload (lost response, outbox re-push): answer with what the first attempt stored.
+			const existing = this.db.query("SELECT id FROM run WHERE upload_id = ?").get(prepared.uploadId) as { id: string } | null;
+			if (existing) return this.ingestResult(existing.id, [...warnings, "This upload was already stored; returned the existing run."]);
+		}
 		const sha256 = createHash("sha256").update(bytes).digest("hex");
 		const duplicate = this.db.query("SELECT id FROM run WHERE export_sha256 = ? LIMIT 1").get(sha256) as { id: string } | undefined;
 		if (duplicate && !options.allowDuplicate) {
@@ -395,15 +400,15 @@ export class Store {
 			const machineId = this.upsertMachine(prepared.machine);
 			this.db.query(`INSERT INTO run (id, repository_id, machine_id, recorded_at, title, conditions, environment, invocation,
 				warmup, notes, baseline_position, export_sha256, source_path, checkout_path, checkout_head, checkout_branch,
-				checkout_dirty, legacy_id) VALUES (:id, :repository_id, :machine_id, :recorded_at, :title, :conditions,
+				checkout_dirty, legacy_id, upload_id) VALUES (:id, :repository_id, :machine_id, :recorded_at, :title, :conditions,
 				:environment, :invocation, :warmup, :notes, :baseline_position, :export_sha256, :source_path, :checkout_path,
-				:checkout_head, :checkout_branch, :checkout_dirty, :legacy_id)`).run({
+				:checkout_head, :checkout_branch, :checkout_dirty, :legacy_id, :upload_id)`).run({
 				id, repository_id: repository.id, machine_id: machineId, recorded_at: recordedAt, title: meta.title ?? null,
 				conditions: meta.conditions ?? null, environment: meta.environment ?? null, invocation: meta.invocation ?? null,
 				warmup: meta.warmup ?? null, notes: meta.notes ?? null, baseline_position: meta.baseline ?? null,
 				export_sha256: sha256, source_path: source, checkout_path: checkout?.path ?? null, checkout_head: checkout?.head ?? null,
 				checkout_branch: checkout?.branch ?? null, checkout_dirty: checkout?.dirty == null ? null : Number(checkout.dirty),
-				legacy_id: prepared.legacyId ?? null,
+				legacy_id: prepared.legacyId ?? null, upload_id: prepared.uploadId ?? null,
 			});
 			const insert = this.db.query(`INSERT INTO measurement (run_id, position, benchmark_id, case_key, label, command,
 				exported_command, commit_sha, dirty, commit_inferred, revision, build, notes, parameters, status, n, mean, stddev,
@@ -433,6 +438,12 @@ export class Store {
 		});
 	}
 
+	private ingestResult(runId: string, warnings: string[]): IngestResult {
+		const run = this.run(runId)!;
+		const measurements = this.runMeasurements(runId);
+		return { run, measurements, benchmark: this.benchmark(measurements[0].benchmarkId)!, repository: this.repository(run.repositoryId)!, warnings };
+	}
+
 	/** Reads a profile (and its symbol sidecar) from disk and attaches it to a measurement. */
 	attachProfile(input: AttachProfileInput): Profile {
 		return this.attachPreparedProfile(input.measurementId, prepareProfile(input));
@@ -441,6 +452,11 @@ export class Store {
 	/** Stores a sampled profile for a measurement: raw files content-addressed, plus an aggregated call tree. */
 	attachPreparedProfile(measurementId: number, value: PreparedProfile): Profile {
 		const input = parsePreparedProfile(value);
+		if (input.uploadId) {
+			const existing = this.db.query("SELECT id, measurement_id FROM profile WHERE upload_id = ?").get(input.uploadId) as { id: number; measurement_id: number } | null;
+			if (existing && existing.measurement_id === measurementId) return this.profile(existing.id)!;
+			if (existing) throw new Error("This profile upload was already attached to another measurement.");
+		}
 		const measurement = this.measurement(measurementId);
 		if (!measurement) throw new Error(`Unknown measurement ${measurementId}.`);
 		const { bytes, syms: symsBytes } = input;
@@ -460,12 +476,12 @@ export class Store {
 		if (symsBytes && symsSha256) store(`${symsSha256}.syms.json`, symsBytes);
 		const id = Number(this.db.query(`INSERT INTO profile (measurement_id, label, tool, sha256, syms_sha256, product, iterations,
 			samples, interval_ms, duration_ms, threads, symbolicated_share, node_count, command, recorded_at, tree, cpu_ms, sampled_ms,
-			cpu_source, tree_version, platform, waits_sampled)
+			cpu_source, tree_version, platform, waits_sampled, upload_id)
 			VALUES (:measurement_id, :label, 'samply', :sha256, :syms_sha256, :product, :iterations, :samples, :interval_ms,
 			:duration_ms, :threads, :symbolicated_share, :node_count, :command, :recorded_at, :tree, :cpu_ms, :sampled_ms,
-			:cpu_source, :tree_version, :platform, :waits_sampled)`).run({
+			:cpu_source, :tree_version, :platform, :waits_sampled, :upload_id)`).run({
 			measurement_id: measurement.id, label: input.label ?? null, sha256, syms_sha256: symsSha256, product: parsed.product,
-			iterations: input.iterations ?? 1, command: input.command ?? null, recorded_at: new Date().toISOString(),
+			iterations: input.iterations ?? 1, command: input.command ?? null, recorded_at: new Date().toISOString(), upload_id: input.uploadId ?? null,
 			...this.profileColumns(parsed),
 		}).lastInsertRowid);
 		this.changed();

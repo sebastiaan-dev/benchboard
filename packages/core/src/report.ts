@@ -148,6 +148,23 @@ function pair(candidates: Measurement[], references: Measurement[]): { candidate
 	};
 }
 
+/**
+ * In-run comparisons: every later measurement of a series (benchmark + case) against the run's
+ * first measurement of it, e.g. head cases against base cases measured in the same invocation.
+ */
+export function runComparisons(store: Store, runId: string, statistic: Statistic = "median", threshold = 0.02): Comparison[] {
+	const first = new Map<string, Measurement>();
+	const comparisons: Comparison[] = [];
+	for (const measurement of store.runMeasurements(runId)) {
+		const key = `${measurement.benchmarkId}\0${measurement.caseKey}`;
+		const reference = first.get(key);
+		if (!reference) { first.set(key, measurement); continue; }
+		const comparison = compare(store, measurement, reference, statistic, threshold);
+		if (comparison) comparisons.push(comparison);
+	}
+	return comparisons;
+}
+
 export function pullRequestReport(store: Store, pullRequestId: number, options: ReportOptions = {}): PullRequestReport {
 	const statistic = options.statistic ?? "median";
 	const threshold = options.threshold ?? 0.02;

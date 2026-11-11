@@ -65,12 +65,24 @@ const json = (status: number, body: unknown, headers: Record<string, string> = {
 	Response.json(body, { status, headers: { "cache-control": "no-store", ...headers } });
 const failure = (status: number, message: string) => json(status, { error: { message }, errors: [{ message }] });
 
+/** Web app files embedded in a standalone binary (URL path → embedded file), replacing apps/web/dist. */
+let embeddedWebApp: Map<string, string> | null = null;
+export function useEmbeddedWebApp(files: Record<string, string>) {
+	embeddedWebApp = new Map(Object.entries(files));
+}
+
 async function serveStatic(url: URL): Promise<Response> {
-	const file = path.normalize(path.join(webRoot, decodeURIComponent(url.pathname)));
-	if (!file.startsWith(webRoot)) return new Response(null, { status: 403 });
-	let asset = Bun.file(file);
-	// Client-side routes fall back to the SPA shell.
-	if (url.pathname.endsWith("/") || !(await asset.exists())) asset = Bun.file(path.join(webRoot, "index.html"));
+	let asset: ReturnType<typeof Bun.file>;
+	if (embeddedWebApp) {
+		const embedded = embeddedWebApp.get(decodeURIComponent(url.pathname));
+		// Client-side routes fall back to the SPA shell.
+		asset = Bun.file(embedded ?? embeddedWebApp.get("/index.html") ?? "/nonexistent");
+	} else {
+		const file = path.normalize(path.join(webRoot, decodeURIComponent(url.pathname)));
+		if (!file.startsWith(webRoot)) return new Response(null, { status: 403 });
+		asset = Bun.file(file);
+		if (url.pathname.endsWith("/") || !(await asset.exists())) asset = Bun.file(path.join(webRoot, "index.html"));
+	}
 	if (!(await asset.exists())) {
 		return new Response("The web app is not built. Run `bun run build` in the benchboard repository, or use `bun run dev`.\nGraphQL is available at /graphql.\n",
 			{ status: 503, headers: { "content-type": "text/plain; charset=utf-8" } });
@@ -205,8 +217,7 @@ export function createServer(store: Store, options: ServerOptions) {
 		}
 		const backend = new LocalBackend(store, { webUrl: linkOrigin(request), principal: who!, links: links(request), remote: true });
 		try {
-			const call = backend[method as MethodName] as (...values: unknown[]) => Promise<unknown>;
-			return json(200, { result: await call.apply(backend, args) });
+			return json(200, { result: await backend.invoke(method as MethodName, args) });
 		} catch (error) {
 			return failure(422, (error as Error).message);
 		}

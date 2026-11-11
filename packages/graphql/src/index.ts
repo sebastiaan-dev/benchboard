@@ -1,8 +1,7 @@
-import { readFileSync } from "node:fs";
 import { makeExecutableSchema } from "@graphql-tools/schema";
 import { GraphQLScalarType, Kind, type GraphQLSchema, type ValueNode } from "graphql";
 import {
-	allows, compare, diffFunctions, functionStats, metricTotal, pullRequestReport, type Comparison, type Metric, type Profile, type Scope,
+	allows, compare, diffFunctions, runComparisons, functionStats, metricTotal, pullRequestReport, type Comparison, type Metric, type Profile, type Scope,
 } from "@benchboard/core";
 import { createContext, localLinks, type Context, type Links } from "./context.ts";
 import type { Resolvers } from "./generated/resolvers.ts";
@@ -10,7 +9,10 @@ import type { CaseParent, PointParent, SeriesParent } from "./mappers.ts";
 
 export { createContext, localLinks, type Context, type Links };
 
-export const typeDefs = readFileSync(new URL("../schema.graphql", import.meta.url), "utf8");
+// A text import, so standalone binaries (bun build --compile) carry the schema.
+import schemaText from "../schema.graphql" with { type: "text" };
+
+export const typeDefs: string = schemaText;
 
 function authorize(context: Context, scope: Scope = "write") {
 	if (!allows(context.principal?.scope ?? null, scope)) {
@@ -235,19 +237,7 @@ export const resolvers: Resolvers = {
 		machine: (run, _, { loaders }) => present(loaders.machine(run.machineId), "The machine"),
 		exportPath: (run, _, { store }) => store.exportPath(run.exportSha256),
 		measurements: (run, _, { loaders }) => loaders.runMeasurements(run.id),
-		pairedComparisons: (run, args, { store, loaders }) => {
-			const first = new Map<string, (typeof measurements)[number]>();
-			const measurements = loaders.runMeasurements(run.id);
-			const comparisons: Comparison[] = [];
-			for (const measurement of measurements) {
-				const key = `${measurement.benchmarkId}\0${measurement.caseKey}`;
-				const reference = first.get(key);
-				if (!reference) { first.set(key, measurement); continue; }
-				const comparison = compare(store, measurement, reference, args.statistic ?? "median", args.threshold ?? 0.02);
-				if (comparison) comparisons.push(comparison);
-			}
-			return comparisons;
-		},
+		pairedComparisons: (run, args, { store }) => runComparisons(store, run.id, args.statistic ?? "median", args.threshold ?? 0.02),
 	},
 	Measurement: {
 		id: (measurement) => String(measurement.id),
