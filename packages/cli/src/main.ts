@@ -4,7 +4,7 @@ import * as os from "node:os";
 import { parseArgs, stripVTControlCharacters, styleText } from "node:util";
 import { spawn } from "node:child_process";
 import {
-	Store, backup, createToken, githubRemotes, importLegacy, listTokens, parsePullRequestReference, parseScope, prepareProfile,
+	Store, backup, createToken, defaultHome, restore, githubRemotes, importLegacy, listTokens, parsePullRequestReference, parseScope, prepareProfile,
 	prepareRun, repositoryIdentity, resolveCommit, revokeToken, snapshotGithubPullRequest, snapshotLocalBranch, verify,
 	type Comparison, type Measurement, type Profile, type PullRequest, type PullRequestSnapshot,
 } from "@benchboard/core";
@@ -64,7 +64,10 @@ Servers (see docs/deployment.md):
   benchboard token create <name> [--scope read|write|admin]
   benchboard token list [--all] | token revoke <id|name>
                                               Manage API tokens of the local data directory
-  benchboard backup <dir>                     Consistent, incremental copy of the data directory
+  benchboard backup <dir> [--every 6h] [--verify]
+                                              Consistent, incremental copy of the data directory
+                                              (--every: keep running, refreshing it at that interval)
+  benchboard restore <backup-dir> [--force]   Copy a backup into the data directory (server stopped)
   benchboard verify                           Check database integrity and stored files
   benchboard healthcheck [--port ${DEFAULT_PORT}]      Exit 0 if the local server answers (for containers)
 
@@ -259,6 +262,15 @@ function githubSnapshot(cwd: string, reference: string | number, knownRepo?: str
 
 const slugOf = (cwd: string) => repositoryIdentity(cwd).slug;
 
+/** "90s", "30m", "6h", "1d" or plain seconds, in milliseconds. */
+export function parseInterval(value: string): number {
+	const match = /^(\d+(?:\.\d+)?)\s*(s|m|h|d)?$/.exec(value.trim());
+	if (!match) throw new Error(`Invalid interval "${value}"; use e.g. 30m, 6h or 1d.`);
+	const ms = Number(match[1]) * { s: 1e3, m: 6e4, h: 36e5, d: 864e5 }[match[2] as "s" | "m" | "h" | "d" ?? "s"];
+	if (ms < 1000) throw new Error("The interval must be at least one second.");
+	return ms;
+}
+
 /**
  * How to track a GitHub PR: snapshot it here (this machine's GitHub access), or, when that fails and a
  * server is in use, let the server fetch it with its own credentials (runners need no GitHub token).
@@ -292,7 +304,8 @@ export async function main(argv: string[]): Promise<number> {
 			"include-dirty": { type: "boolean" }, limit: { type: "string" }, variables: { type: "string" },
 			port: { type: "string" }, host: { type: "string" }, open: { type: "boolean" }, auth: { type: "string" }, "public-url": { type: "string" },
 			syms: { type: "string" }, iterations: { type: "string" }, label: { type: "string" }, rate: { type: "string" },
-			metric: { type: "string" }, "measured-on": { type: "string" },
+			metric: { type: "string" }, "measured-on": { type: "string" }, every: { type: "string" }, verify: { type: "boolean" },
+			force: { type: "boolean" },
 		},
 	});
 	const [command, ...rest] = positionals;
@@ -688,11 +701,50 @@ export async function main(argv: string[]): Promise<number> {
 				throw new Error("Usage: benchboard token <create|list|revoke> ...");
 			}
 			case "backup": {
-				if (rest.length !== 1) throw new Error("Usage: benchboard backup <directory>");
-				const result = backup(localOnly(), rest[0]);
-				if (options.json) json(result);
-				else console.log(`Backed up ${localOnly().home} to ${result.directory}: database plus ${result.copied} new files (${result.skipped} already present), ${(result.bytes / 1024 / 1024).toFixed(1)} MiB written.`);
+				if (rest.length !== 1) throw new Error("Usage: benchboard backup <directory> [--every <interval>] [--verify]");
+				const local = localOnly();
+				const once = () => {
+					const result = backup(local, rest[0]);
+					if (options.json) json(result);
+					else console.log(`${new Date().toISOString()} backed up ${local.home} to ${result.directory}: database plus ${result.copied} new files (${result.skipped} already present), ${(result.bytes / 1024 / 1024).toFixed(1)} MiB written.`);
+					if (options.verify) {
+						const copy = new Store(result.directory);
+						try {
+							const check = verify(copy);
+							if (!check.ok) throw new Error(`the backup in ${result.directory} failed verification: ${JSON.stringify({ integrity: check.integrity, missingExports: check.missingExports.length, missingProfiles: check.missingProfiles.length })}`);
+							if (!options.json) console.log(`${new Date().toISOString()} verified: ${check.counts.runs} runs, ${check.counts.profiles} profiles.`);
+						} finally {
+							copy.close();
+						}
+					}
+				};
+				if (!options.every) { once(); return 0; }
+				// A backup service: back up now and then at every interval, until stopped (SIGTERM/SIGINT).
+				const interval = parseInterval(options.every);
+				let stop: () => void = () => {};
+				const stopped = new Promise<void>((resolve) => { stop = resolve; });
+				let running = true;
+				for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { running = false; stop(); });
+				while (running) {
+					try {
+						once();
+					} catch (error) {
+						console.error(`${new Date().toISOString()} benchboard: backup failed: ${(error as Error).message}`);
+					}
+					await Promise.race([Bun.sleep(interval), stopped]);
+				}
 				return 0;
+			}
+			case "restore": {
+				if (rest.length !== 1) throw new Error("Usage: benchboard restore <backup-directory> [--force]");
+				const target = home ?? defaultHome();
+				const result = restore(rest[0], target, { force: options.force });
+				// Opening applies any newer migrations; then check what was restored.
+				const restored = openStore();
+				const check = verify(restored);
+				console.log(`Restored ${path.resolve(rest[0])} into ${result.directory} (${result.files} files)${result.previous ? `; the previous database is ${result.previous}` : ""}.`);
+				console.log(`${check.ok ? "Verified" : "VERIFICATION FAILED"}: ${check.counts.runs} runs, ${check.counts.profiles} profiles, ${check.counts.pullRequests} pull requests.`);
+				return check.ok ? 0 : 1;
 			}
 			case "verify": {
 				const result = verify(localOnly());

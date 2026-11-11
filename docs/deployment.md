@@ -142,37 +142,57 @@ over `benchboard.db` and start the older image.
 * foreign keys;
 * that every referenced export and profile file exists.
 
-The `backup` compose profile does this every six hours (`BENCHBOARD_BACKUP_INTERVAL`, in seconds)
-into the `benchboard-backups` volume:
+The `backup` compose profile runs `benchboard backup /backups/latest --every 6h --verify` into the
+`benchboard-backups` volume. Set the interval with `BENCHBOARD_BACKUP_INTERVAL`, e.g. `30m` or `1d`:
 
 ```sh
 docker compose --profile backup up -d
 ```
 
 Set `BENCHBOARD_BACKUP_DIR` to a host path (owned by uid 1000) to put backups on the host instead.
-Ship that directory off-site with your usual tool (restic, borg, rsync). Without compose:
+Ship that directory off-site with your usual tool (restic, borg, rsync). One-off backups use the
+same service, which mounts both volumes:
 
 ```sh
-docker compose exec benchboard benchboard backup /backups/$(date +%F)   # any directory in the container
+docker compose run --rm backup backup /backups/$(date +%F) --verify
 ```
 
-To **restore**:
+To **restore**, stop the server and run `benchboard restore`, which:
 
-1. Stop the server.
-2. Copy a backup directory's contents into an empty data directory (or volume).
-3. Start the server.
+* copies the backup's files and database into the data volume;
+* keeps any replaced database as `benchboard.db.before-restore-<time>`;
+* applies newer migrations and verifies the result.
 
-For example:
+Then start the server again:
 
 ```sh
-docker compose down
-docker volume create benchboard-restore
-docker run --rm -v benchboard_benchboard-backups:/backups:ro -v benchboard-restore:/data benchboard:latest \
-  sh -c 'cp -a /backups/latest/. /data/ && benchboard verify --home /data'
-# then point the benchboard service's volume at benchboard-restore (or copy into benchboard-data)
+docker compose stop benchboard
+docker compose run --rm backup restore /backups/latest --force   # --force: replace the current database
+docker compose start benchboard
 ```
 
-Tokens are part of the database, so a restored server accepts the same tokens.
+Without `--force`, `restore` refuses to replace an existing database, so restoring into a fresh volume
+needs no flag. Tokens are part of the database, so a restored server accepts the same tokens.
+
+## The image
+
+* **Contents.** One standalone `benchboard` executable on
+  [distroless](https://github.com/GoogleContainerTools/distroless) `base-nossl`: the CLI, the server and
+  the embedded web app. The base adds only glibc, CA certificates and tzdata: no shell, package
+  manager or language runtime. About 45 MB compressed.
+* **Builds.** The Dockerfile compiles on the build machine's platform and cross-compiles for the
+  target (`bun build --compile`), so amd64 and arm64 images build without emulation. amd64 uses Bun's
+  baseline build, which runs on CPUs without AVX2.
+* **Runtime.** It runs as uid 1000 (as earlier images did, so existing volumes keep working), and the
+  entrypoint is `benchboard` with `serve` as the default command. So
+  `docker run --rm -v benchboard_benchboard-data:/data ghcr.io/sebastiaan-dev/benchboard:edge verify`
+  runs any command against the data.
+* **Hardening.** The compose file runs it with a read-only root filesystem, a tmpfs `/tmp`, no
+  capabilities and `no-new-privileges`. Benchboard writes only to its volumes.
+* **Published images** carry an SBOM and SLSA provenance, attested with GitHub's artifact attestations:
+  `gh attestation verify oci://ghcr.io/sebastiaan-dev/benchboard:edge --owner sebastiaan-dev`.
+* **Debugging.** There is no shell inside. To inspect a volume, use a throwaway container:
+  `docker run --rm -it -v benchboard_benchboard-data:/data busybox`.
 
 ## Health and operations
 

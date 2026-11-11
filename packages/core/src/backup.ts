@@ -90,3 +90,40 @@ export function verify(store: Store): VerifyResult {
 		counts: { runs: count("run"), measurements: count("measurement"), profiles: count("profile"), pullRequests: count("pull_request") },
 	};
 }
+
+export interface RestoreResult {
+	directory: string;
+	/** Where the replaced database went (only with `force`). */
+	previous: string | null;
+	files: number;
+}
+
+/**
+ * Copies a backup into a data directory (stop the server first). An existing database is only
+ * replaced with `force`, and then kept as `benchboard.db.before-restore-<time>`; stored files are
+ * content-addressed, so the backup's are added to those already present.
+ */
+export function restore(backupDirectory: string, home: string, options: { force?: boolean } = {}): RestoreResult {
+	const source = path.resolve(backupDirectory);
+	const target = path.resolve(home);
+	if (source === target) throw new Error("The backup directory must differ from the data directory.");
+	if (!fs.existsSync(path.join(source, "benchboard.db"))) throw new Error(`${source} is not a Benchboard backup (no benchboard.db).`);
+	const database = path.join(target, "benchboard.db");
+	let previous: string | null = null;
+	if (fs.existsSync(database)) {
+		if (!options.force) throw new Error(`${target} already has a database; pass --force to replace it (it is kept as a copy).`);
+		previous = `${database}.before-restore-${new Date().toISOString().replace(/[-:.]/g, "")}`;
+		fs.renameSync(database, previous);
+		for (const suffix of ["-wal", "-shm"]) if (fs.existsSync(database + suffix)) fs.renameSync(database + suffix, previous + suffix);
+	}
+	fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+	const result: BackupResult = { directory: target, schemaVersion: SCHEMA_VERSION, copied: 0, skipped: 0, bytes: 0 };
+	copyBlobs(path.join(source, "exports"), path.join(target, "exports"), result);
+	copyBlobs(path.join(source, "profiles"), path.join(target, "profiles"), result);
+	if (fs.existsSync(path.join(source, "secret.key"))) fs.copyFileSync(path.join(source, "secret.key"), path.join(target, "secret.key"));
+	// The database last, so a directory with a database always has its files.
+	fs.copyFileSync(path.join(source, "benchboard.db"), `${database}.tmp`);
+	fs.chmodSync(`${database}.tmp`, 0o600);
+	fs.renameSync(`${database}.tmp`, database);
+	return { directory: target, previous, files: result.copied };
+}

@@ -5,6 +5,7 @@
  *   bun scripts/build-binaries.ts                  # this platform → dist/bin/benchboard-<os>-<arch>
  *   bun scripts/build-binaries.ts --all            # linux-x64, linux-arm64, darwin-x64, darwin-arm64
  *   bun scripts/build-binaries.ts --target bun-linux-arm64
+ *   bun scripts/build-binaries.ts --target bun-linux-x64-baseline   # CPUs without AVX2
  *
  * Writes SHA256SUMS next to the binaries. The version is the package version plus `git describe`.
  */
@@ -40,8 +41,18 @@ fs.writeFileSync(entry, [
 ].join("\n"));
 
 const pkg = JSON.parse(fs.readFileSync(path.join(root, "packages/cli/package.json"), "utf8")) as { version: string };
-const describe = Bun.spawnSync(["git", "describe", "--tags", "--match", "v*", "--always", "--dirty"], { cwd: root }).stdout.toString().trim();
-const version = describe && !describe.startsWith(`v${pkg.version}`) ? `${pkg.version}+${describe}` : describe.replace(/^v/, "") || pkg.version;
+const gitDescribe = () => {
+	try {
+		return Bun.spawnSync(["git", "describe", "--tags", "--match", "v*", "--always", "--dirty"], { cwd: root, stderr: "ignore" }).stdout.toString().trim();
+	} catch {
+		return ""; // no git (e.g. a container build)
+	}
+};
+// BENCHBOARD_VERSION wins (container builds have no .git), then git, then the package version.
+const version = process.env.BENCHBOARD_VERSION?.trim() || (() => {
+	const describe = gitDescribe();
+	return describe && !describe.startsWith(`v${pkg.version}`) ? `${pkg.version}+${describe}` : describe.replace(/^v/, "") || pkg.version;
+})();
 
 fs.mkdirSync(out, { recursive: true });
 const sums: string[] = [];

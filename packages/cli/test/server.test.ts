@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { test } from "bun:test";
-import { series, setup, startServer, t } from "./helpers.ts";
+import { bin, series, setup, startServer, t } from "./helpers.ts";
 import { syntheticProfile } from "../../core/test/synthetic-profile.ts";
 
 /**
@@ -113,6 +113,24 @@ test("server: remote ingest, scoped tokens, browser sessions, signed profile lin
 	const verified = cliWith({ BENCHBOARD_HOME: destination })("verify", "--json");
 	assert.equal(verified.code, 0, verified.stdout);
 	assert.deepEqual(JSON.parse(verified.stdout).counts, { runs: 1, measurements: 2, profiles: 1, pullRequests: 1 });
+	// Restore into an empty data directory; an existing database is only replaced with --force, and kept.
+	const restored = path.join(root, "restored");
+	const restoreRun = cliWith({ BENCHBOARD_HOME: restored })("restore", destination);
+	assert.equal(restoreRun.code, 0, restoreRun.stderr);
+	assert.match(restoreRun.stdout, /Verified: 1 runs, 1 profiles, 1 pull requests/);
+	assert.match(cliWith({ BENCHBOARD_HOME: restored })("restore", destination).stderr, /already has a database; pass --force/);
+	assert.match(cliWith({ BENCHBOARD_HOME: restored })("restore", destination, "--force").stdout, /previous database is .*before-restore-/);
+
+	// The backup service: backs up at every interval and stops cleanly on SIGTERM.
+	const service = Bun.spawn([process.execPath, bin, "backup", path.join(root, "rolling"), "--every", "1s", "--verify"], { env, stdout: "pipe", stderr: "pipe" });
+	const lines: string[] = [];
+	const collecting = (async () => { for await (const chunk of service.stdout) lines.push(...new TextDecoder().decode(chunk).split("\n")); })();
+	for (let waited = 0; lines.filter((line) => line.includes("verified:")).length < 2 && waited < 20_000; waited += 100) await Bun.sleep(100);
+	service.kill("SIGTERM");
+	assert.equal(await service.exited, 0);
+	await collecting;
+	assert.ok(lines.filter((line) => line.includes("backed up")).length >= 2, lines.join("\n"));
+
 	fs.rmSync(path.join(destination, "profiles"), { recursive: true });
 	assert.equal(cliWith({ BENCHBOARD_HOME: destination })("verify").code, 1);
 	assert.equal(fs.statSync(path.join(home, "secret.key")).mode & 0o777, 0o600);

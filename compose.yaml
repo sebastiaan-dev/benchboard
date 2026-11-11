@@ -8,10 +8,20 @@ name: benchboard
 x-image: &image
   image: ${BENCHBOARD_IMAGE:-benchboard:latest}
 
+# Benchboard only writes to its volumes: everything else is read-only and unprivileged.
+x-hardening: &hardening
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
 services:
   benchboard:
-    <<: *image
-    build: .
+    <<: [*image, *hardening]
+    build:
+      context: .
+      args:
+        BENCHBOARD_VERSION: ${BENCHBOARD_VERSION:-}
     restart: unless-stopped
     init: true
     environment:
@@ -41,17 +51,15 @@ services:
       - caddy-data:/data
       - caddy-config:/config
 
-  # Every BENCHBOARD_BACKUP_INTERVAL seconds, refreshes a consistent copy of the data in /backups/latest
-  # (database snapshot plus new files only). Back that directory up off-site (restic, borg, rsync).
+  # Every BENCHBOARD_BACKUP_INTERVAL (30m, 6h, 1d; default 6h), refreshes and verifies a consistent copy of
+  # the data in /backups/latest (database snapshot plus new files only). Back that up off-site (restic, borg, rsync).
   backup:
-    <<: *image
+    <<: [*image, *hardening]
     profiles: [backup]
     restart: unless-stopped
     init: true
     depends_on: [benchboard]
-    entrypoint: ["/bin/sh", "-c", "while :; do benchboard backup /backups/latest && benchboard verify --home /backups/latest || echo 'benchboard backup failed' >&2; sleep \"$${BENCHBOARD_BACKUP_INTERVAL:-21600}\"; done"]
-    environment:
-      BENCHBOARD_BACKUP_INTERVAL: ${BENCHBOARD_BACKUP_INTERVAL:-21600}
+    command: ["backup", "/backups/latest", "--every", "${BENCHBOARD_BACKUP_INTERVAL:-6h}", "--verify"]
     volumes:
       - benchboard-data:/data
       # A named volume by default; set BENCHBOARD_BACKUP_DIR to a host path (owned by uid 1000) to bind-mount one.

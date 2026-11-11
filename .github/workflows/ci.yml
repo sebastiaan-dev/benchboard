@@ -113,11 +113,18 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
     env:
       IMAGE: ghcr.io/${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
+      - name: Version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then echo "value=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else echo "value=$(jq -r .version packages/cli/package.json)+${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"; fi
+      # No QEMU: the Dockerfile cross-compiles on the runner's platform for each target.
       - uses: docker/setup-buildx-action@v3
       - name: Build for this runner
         uses: docker/build-push-action@v6
@@ -125,20 +132,25 @@ jobs:
           context: .
           load: true
           tags: benchboard:ci
+          build-args: BENCHBOARD_VERSION=${{ steps.version.outputs.value }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
-      - name: Smoke-test the image
+      - name: Smoke-test the image (read-only, unprivileged)
         run: |
-          docker run -d --name benchboard -p 127.0.0.1:4319:4319 -e BENCHBOARD_PUBLIC_URL=http://localhost:4319 benchboard:ci
+          docker run -d --name benchboard --read-only --tmpfs /tmp --cap-drop ALL --security-opt no-new-privileges \
+            -p 127.0.0.1:4319:4319 -e BENCHBOARD_PUBLIC_URL=http://localhost:4319 benchboard:ci
           for attempt in $(seq 1 30); do
             curl -fsS http://localhost:4319/healthz && break
             sleep 1
           done
+          test "$(docker run --rm benchboard:ci --version)" = "benchboard ${{ steps.version.outputs.value }}"
           token=$(docker exec benchboard benchboard token create ci --scope read 2>/dev/null)
           test "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{"query":"{ runs { id } }"}' http://localhost:4319/graphql)" = 401
           curl -fsS -X POST -H 'content-type: application/json' -H "authorization: Bearer $token" -d '{"query":"{ runs { id } }"}' http://localhost:4319/graphql
+          curl -fsS http://localhost:4319/ | grep -q '<title>Benchboard'
           docker stop benchboard
           docker logs benchboard
+          docker images benchboard:ci
       - uses: docker/metadata-action@v5
         id: meta
         with:
@@ -155,6 +167,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and publish (linux/amd64, linux/arm64)
+        id: push
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -162,5 +175,15 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: BENCHBOARD_VERSION=${{ steps.version.outputs.value }}
+          provenance: mode=max
+          sbom: true
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Attest the published image
+        if: github.event_name != 'pull_request'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

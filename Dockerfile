@@ -1,41 +1,50 @@
 # syntax=docker/dockerfile:1
-# Benchboard server image: the CLI's `serve` with the built web app. Data lives in the /data volume.
+# check=skip=SecretsUsedInArgOrEnv
+# (BENCHBOARD_AUTH selects the authentication mode; it is not a secret.)
+# Benchboard server image: one standalone executable (CLI + server + web app, from
+# `bun build --compile`) on distroless. No shell, package manager or runtime besides glibc.
+# Data lives in the /data volume.
 ARG BUN_VERSION=1.4.2
 
-FROM oven/bun:${BUN_VERSION} AS manifests
+# Builds on the build machine's own platform and cross-compiles for the target, so multi-arch
+# images need no emulation.
+FROM --platform=$BUILDPLATFORM oven/bun:${BUN_VERSION} AS build
 WORKDIR /app
 COPY package.json bun.lock ./
 COPY apps/web/package.json apps/web/
 COPY packages/cli/package.json packages/cli/
 COPY packages/core/package.json packages/core/
 COPY packages/graphql/package.json packages/graphql/
-
-# Build the web app (needs every dev dependency).
-FROM manifests AS build
 RUN bun install --frozen-lockfile
 COPY . .
-RUN bun run --filter @benchboard/web build
+ARG TARGETARCH
+ARG BENCHBOARD_VERSION=
+RUN bun run --filter @benchboard/web build \
+	&& case "$TARGETARCH" in \
+		amd64) target=bun-linux-x64-baseline ;; \
+		arm64) target=bun-linux-arm64 ;; \
+		*) echo "unsupported architecture $TARGETARCH" >&2; exit 1 ;; \
+	esac \
+	&& BENCHBOARD_VERSION="$BENCHBOARD_VERSION" bun scripts/build-binaries.ts --target "$target" --out /out \
+	&& mv "/out/benchboard-${target#bun-}" /out/benchboard \
+	&& mkdir -p /rootfs/data /rootfs/backups && chmod 0700 /rootfs/data /rootfs/backups
 
-# Runtime dependencies of the server only.
-FROM manifests AS deps
-RUN bun install --frozen-lockfile --production --filter @benchboard/cli
-
-FROM oven/bun:${BUN_VERSION}-slim AS runtime
-WORKDIR /app
-COPY --from=deps /app ./
-COPY packages ./packages
-COPY --from=build /app/apps/web/dist ./apps/web/dist
-RUN printf '#!/bin/sh\nexec bun /app/packages/cli/bin/benchboard.ts "$@"\n' > /usr/local/bin/benchboard \
-	&& chmod 0755 /usr/local/bin/benchboard \
-	&& mkdir -p /data /backups && chown bun:bun /data /backups && chmod 0700 /data /backups
-USER bun
-ENV NODE_ENV=production \
-	BENCHBOARD_HOME=/data \
+# The binary needs only glibc (Bun links libc, libm, libdl and libpthread, and carries its own TLS and
+# CA roots): base-nossl has glibc, CA certificates and tzdata, and nothing else. For a shell while
+# debugging, use the :debug-nonroot tag of the same image.
+FROM gcr.io/distroless/base-nossl-debian12:nonroot AS runtime
+COPY --from=build /out/benchboard /usr/local/bin/benchboard
+# uid 1000 owns the data, as in earlier images, so existing volumes keep working.
+COPY --from=build --chown=1000:1000 /rootfs/ /
+USER 1000:1000
+ENV BENCHBOARD_HOME=/data \
 	BENCHBOARD_HOST=0.0.0.0 \
 	BENCHBOARD_PORT=4319 \
-	BENCHBOARD_AUTH=token
+	BENCHBOARD_AUTH=token \
+	HOME=/data
 VOLUME ["/data"]
 EXPOSE 4319
-HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["benchboard", "healthcheck"]
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD ["/usr/local/bin/benchboard", "healthcheck"]
 STOPSIGNAL SIGTERM
-CMD ["benchboard", "serve"]
+ENTRYPOINT ["/usr/local/bin/benchboard"]
+CMD ["serve"]
